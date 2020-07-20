@@ -19,11 +19,91 @@ import java.util.jar.Manifest;
 import java.util.regex.MatchResult;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 public class lfe {
+    static class MisuseError extends Error {
+        MisuseError(String message) { super(message); }
+    }
+
+    enum Flag {WARN_MISSING_FEATURES}
+    private final WLP wlp;
+    private final EnumSet<Flag> flags ;
+    private final Pattern query;
+
     public static void main(String... args) throws Exception {
-        final WLP wlp = new WLP();
+        try {
+            new lfe(args).run();
+        } catch (MisuseError e) {
+            System.err.println("ERROR: " + e.getMessage());
+            System.err.println();
+            System.err.println("Usage: " + lfe.class.getSimpleName() + " [--warn-missing-features] pattern");
+            System.err.println("Prints information about features when run from the root of an OpenLiberty installation.");
+        }
+    }
+
+    public lfe(String... args) {
+        class ArgParser {
+            final EnumSet<Flag> flags = EnumSet.noneOf(Flag.class);
+            final Pattern query;
+            int argIndex = 0;
+
+            ArgParser() {
+                parseOptions();
+                this.query = parseRemainingArguments();
+            }
+
+            private void parseOptions() {
+                for (; argIndex < args.length; argIndex++) {
+                    switch (args[argIndex]) {
+                        case "--warn-missing-features":
+                            flags.add(Flag.WARN_MISSING_FEATURES);
+                            break;
+                        case "--":
+                            ++argIndex;
+                            return;
+                        default:
+                            if (args[argIndex].startsWith("--")) throw new MisuseError("unknown flag or option '" + args[argIndex] + "'");
+                            return; // without incrementing i
+                    }
+                }
+            }
+
+            private Pattern parseRemainingArguments() {
+                return Pattern.compile(
+                        IntStream.range(argIndex, args.length)
+                        .peek(i -> argIndex = i)
+                        .mapToObj(i -> args[i])
+                        .map(lfe::globToRegex)
+                        .collect(Collectors.joining("|", "(?i:", ")")));
+            }
+        }
+        var parser = new ArgParser();
+        this.flags = parser.flags;
+        this.query = parser.query;
+        this.wlp = new WLP();
+        if (flags.contains(Flag.WARN_MISSING_FEATURES)) wlp.warnMissingFeatures();
+    }
+
+    private static String globToRegex(String glob) {
+        var scanner = new Scanner(glob);
+        var sb = new StringBuilder();
+        scanner.useDelimiter("((?<=[?*])|(?=[?*]))"); // delimit immediately before and/or after a * or ?
+        while (scanner.hasNext()) {
+            String token = scanner.next();
+            switch (token) {
+                case "?": sb.append("."); break;
+                case "*": sb.append(".*"); break;
+                default: sb.append(Pattern.quote(token));
+            }
+        }
+        return sb.toString();
+    }
+
+
+    private void run() {
 //        printTolerantFeatures(wlp);
 //        System.out.println();
         // list all the features with "cdi" in the name
@@ -32,14 +112,13 @@ public class lfe {
         // print all bundles pulled in by auto-features
 //        printBundlesIncludedInAutoFeatures(wlp);
 //        System.out.println();
-        String featurePattern = args[0].toLowerCase();
-        wlp.findFeatures(featurePattern)
+        wlp.findFeatures(query)
                 .peek(f -> System.out.printf("===%s===%n", Features.name(f)))
                 .flatMap(wlp::dependentFeatures)
                 .map(Features::name)
                 .forEach(n -> System.out.printf("\t%s%n", n));
 
-//        printMatchingFeatures(wlp, featurePattern);
+        printMatchingFeatures(wlp, query);
     }
 
     private static void printBundlesIncludedInAutoFeatures(WLP wlp) {
@@ -54,10 +133,10 @@ public class lfe {
                 .forEach(System.out::println);
     }
 
-    private static void printMatchingFeatures(WLP wlp, String substring) {
+    private static void printMatchingFeatures(WLP wlp, Pattern p) {
         wlp.features()
                 .map(Key.SUBSYSTEM_SYMBOLICNAME)
-                .filter(s -> s.contains(substring))
+                .filter(f -> p.matcher(f).matches())
                 .forEach(System.out::println);
     }
 
@@ -149,14 +228,16 @@ enum Key implements Function<Attributes, String>, Predicate<Attributes> {
         return feature.containsKey(name);
     }
     boolean isAbsent(Attributes feature) { return !!! isPresent(feature); }
-    String get(Attributes feature) { return feature.getValue(name); }
+    Optional<String> get(Attributes feature) { return Optional.ofNullable(feature.getValue(name)); }
     Stream<ValueElement> parseValues(Attributes feature) {
-        return ELEMENT_PATTERN.matcher(this.get(feature))
-                .results()
+        return get(feature)
+                .map(ELEMENT_PATTERN::matcher)
+                .map(Matcher::results)
+                .orElse(Stream.empty())
                 .map(MatchResult::group)
                 .map(ValueElement::new);
     }
-    public String apply(Attributes feature) { return get(feature); }
+    public String apply(Attributes feature) { return feature.getValue(name); }
     public boolean test(Attributes feature) { return isPresent(feature); }
 }
 
@@ -165,12 +246,16 @@ enum Visibility implements Predicate<Attributes> {
     private static Pattern VISIBILITY_PATTERN = Pattern.compile(";visibility:=([^ ;]+)");
 
     static Visibility valueOf(Attributes feature) {
-        Matcher m = VISIBILITY_PATTERN.matcher(Key.SUBSYSTEM_SYMBOLICNAME.get(feature).replaceAll(" ", ""));
-        if (m.find()) {
-            String s = m.group(1);
-            return Visibility.valueOf(s.toUpperCase());
-        }
-        return DEFAULT;
+        return Key.SUBSYSTEM_SYMBOLICNAME.get(feature)
+                .map(s -> s.replaceAll(" ", ""))
+                .map(VISIBILITY_PATTERN::matcher)
+                .map(Matcher::results)
+                .orElse(Stream.empty())
+                .findFirst()
+                .map(m -> m.group(1))
+                .map(String::toUpperCase)
+                .map(Visibility::valueOf)
+                .orElse(Visibility.DEFAULT);
     }
 
     public boolean test(Attributes feature) {
@@ -190,9 +275,7 @@ enum Features {
         }
     }
 
-    static String name(Attributes feature) {
-        return Key.IBM_SHORTNAME.isPresent(feature) ? Key.IBM_SHORTNAME.get(feature) : fullName(feature).toString();
-    }
+    static String name(Attributes feature) { return Key.IBM_SHORTNAME.get(feature).orElse(fullName(feature)); }
 
     static String fullName(Attributes feature) {
         return Key.SUBSYSTEM_SYMBOLICNAME
@@ -227,24 +310,15 @@ class WLP {
                     .forEach(f -> {
                         if (null != featureMap.put(Features.fullName(f), f))
                             System.err.println("WARNING: duplicate symbolic name found: " + Key.SUBSYSTEM_SYMBOLICNAME.get(f));
-                        if (Key.IBM_SHORTNAME.isPresent(f)) {
-                            if (null != shortNames.put(Key.IBM_SHORTNAME.get(f), f))
-                                System.err.println("WARNING: duplicate short name found: " + Key.IBM_SHORTNAME.get(f));;
-                        }
+                        Key.IBM_SHORTNAME.get(f).ifPresent(shortName -> {
+                            if (null != shortNames.put(shortName, f))
+                                System.err.println("WARNING: duplicate short name found: " + shortName);
+                        });
                     });
         } catch (IOException e) {
             throw new IOError(e);
         }
-        // process features to check dependencies and list bundles
-        features()
-                .filter(Key.SUBSYSTEM_CONTENT)
-                .forEach(f -> Key.SUBSYSTEM_CONTENT.parseValues(f)
-                        .filter(v -> "osgi.subsystem.feature".equals(v.metadata.get("type")))
-                        .map(v -> v.id)
-                        .filter(id -> !!!featureMap.containsKey(id))
-                        .forEach(id -> System.err.printf("WARNING: feature '%s' depends on absent feature '%s'. " +
-                                "This dependency will be ignored.%n",
-                                Features.name(f), id)));
+        // follow dependencies
         features()
                 .filter(Key.SUBSYSTEM_CONTENT)
                 .forEach(f -> {
@@ -259,26 +333,41 @@ class WLP {
                 });
     }
 
+    void warnMissingFeatures() {
+        features()
+                .filter(Key.SUBSYSTEM_CONTENT)
+                .forEach(f -> Key.SUBSYSTEM_CONTENT.parseValues(f)
+                        .filter(v -> "osgi.subsystem.feature".equals(v.metadata.get("type")))
+                        .map(v -> v.id)
+                        .filter(id -> !!!featureMap.containsKey(id))
+                        .forEach(id -> System.err.printf("WARNING: feature '%s' depends on absent feature '%s'. " +
+                                "This dependency will be ignored.%n",
+                                Features.name(f), id)));
+    }
+
     Stream<Attributes> features() { return featureMap.values().stream(); }
 
-    public Stream<Attributes> findFeatures(String featurePattern) {
+    public Stream<Attributes> findFeatures(Pattern featurePattern) {
         return featureMap.values()
                 .stream()
-                .filter(f -> {
-                    final String shortName = Key.IBM_SHORTNAME.get(f);
-                    if (shortName != null && shortName.toLowerCase().contains(featurePattern.toLowerCase())) return true;
-                    return Key.SUBSYSTEM_SYMBOLICNAME.parseValues(f)
-                            .findFirst()
-                            .map(v -> v.id.toLowerCase().contains(featurePattern.toLowerCase()))
-                            .orElse(false);
-                });
+                .filter(f -> Key.IBM_SHORTNAME.get(f)
+                            .map(featurePattern::matcher)
+                            .map(Matcher::matches)
+                            .filter(b -> b) // only consider actual matches
+                            .orElse(Key.SUBSYSTEM_SYMBOLICNAME.parseValues(f)
+                                    .findFirst()
+                                    .map(v -> v.id)
+                                    .map(featurePattern::matcher)
+                                    .map(Matcher::matches)
+                                    .orElse(false)));
     }
 
     public Stream<Attributes> dependentFeatures(Attributes rootFeature) {
         return Key.SUBSYSTEM_CONTENT.parseValues(rootFeature)
                 .filter(v -> "osgi.subsystem.feature".equals(v.metadata.get("type")))
                 .map(v -> v.id)
-                .map(featureMap::get);
+                .map(featureMap::get)
+                .filter(Objects::nonNull);
     }
 }
 
