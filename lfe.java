@@ -39,10 +39,7 @@ import java.util.stream.Stream;
 public class lfe {
     static final Path FEATURES_SUBDIR = Paths.get("lib/features");
 
-    static class MisuseError extends Error {
-        MisuseError(String message) { super(message); }
-
-    }
+    static class MisuseError extends Error { MisuseError(String message) { super(message); }}
 
     enum Flag {WARN_MISSING_FEATURES, DENOTE_AUTO_FEATURES, DISPLAY_SHORTNAMES}
 
@@ -67,7 +64,6 @@ public class lfe {
         final Pattern query;
         final String[] args;
         int argIndex;
-
 
         ArgParser(String...args) {
             this.args = args;
@@ -132,20 +128,6 @@ public class lfe {
     }
 
     void run() {
-//        printTolerantFeatures(wlp);
-//        System.out.println();
-        // list all the features with "cdi" in the name
-//        printMatchingFeatures(wlp, "cdi");
-//        System.out.println();
-        // print all bundles pulled in by auto-features
-//        printBundlesIncludedInAutoFeatures(wlp);
-//        System.out.println();
-        wlp.findFeatures(query)
-                .peek(f -> System.out.printf("[%s]%n", displayName(f)))
-                .flatMap(wlp::dependentFeatures)
-                .map(lfe.this::displayName)
-                .forEach(n -> System.out.printf("\t%s%n", n));
-
         printMatchingFeatures(wlp, query);
     }
 
@@ -181,7 +163,13 @@ public class lfe {
                 .id;
     }
 
-
+    private void printDeps() {
+        wlp.findFeatures(query)
+                .peek(f -> System.out.printf("[%s]%n", displayName(f)))
+                .flatMap(wlp::dependentFeatures)
+                .map(lfe.this::displayName)
+                .forEach(n -> System.out.printf("\t%s%n", n));
+    }
 
     void printBundlesIncludedInAutoFeatures(WLP wlp) {
         wlp.features()
@@ -196,9 +184,8 @@ public class lfe {
     }
 
     void printMatchingFeatures(WLP wlp, Pattern p) {
-        wlp.features()
-                .map(Key.SUBSYSTEM_SYMBOLICNAME)
-                .filter(f -> p.matcher(f).matches())
+        wlp.findFeatures(p)
+                .map(this::displayName)
                 .forEach(System.out::println);
     }
 
