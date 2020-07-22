@@ -47,9 +47,10 @@
         enum Flag {
             HELP("Print this usage message."),
             DECORATE("Mark features with special qualifiers as follows:"
-                    + "%n\t\t\t[auto] auto-features are automatically enabled when certain combinations are in play"
-                    + "%n\t\t\t[superseded] - features that have been superseded"
-                    + "%n\t\t\t[singleton] - singleton features must only have one version installed in any server"
+                    + "%n\t\t\tpublic|private|protected - the declared visibility"
+                    + "%n\t\t\tauto - feature automatically enabled in certain conditions"
+                    + "%n\t\t\tsuperseded - has been superseded by another feature"
+                    + "%n\t\t\tsingleton - only one version of this feature can be installed per server"
             ),
             FULL_NAMES("Always use the symbolic name of the feature, even if it has a short name."),
             SIMPLE_SORT("Sort by full name. Do not categorise by visibility. Implies --full-names.") { void addTo(Set<Flag> flags) { super.addTo(flags); FULL_NAMES.addTo(flags); }},
@@ -153,38 +154,43 @@
         }
 
         void run() {
+            // some flags need processing up front
             for (Flag flag: flags) switch (flag) {
-                case HELP:
-                    printUsage();
-                    return;
-                case WARN_MISSING:
-                    wlp.warnMissingFeatures();
-                    break;
-                default:
-                    // other flags are used elsewhere
-                    break;
+                case HELP: printUsage(); return;
+                case WARN_MISSING: wlp.warnMissingFeatures();break;
             }
 
-            final Consumer<Attributes> trackVisibility;
-            final Comparator<Attributes> sortOrder;
-            if (flags.contains(Flag.SIMPLE_SORT)) {
-                sortOrder = comparing(this::featureName);
-                trackVisibility = f -> {};
-            } else {
-                sortOrder = comparing(Visibility::from).thenComparing(this::featureName);
-                Visibility[] currentVisibility = {null};
-                trackVisibility = f -> {
-                    Visibility newVis = Visibility.from(f);
-                    if (newVis == currentVisibility[0]) return;
-                    currentVisibility[0] = newVis;
-                    System.out.printf("[%s FEATURES]\n", newVis);
-                };
+            if (flags.contains(Flag.DECORATE)) { // print some heading columns first
+                System.out.println("# VISIBILITY AUTO SUPERSEDED SINGLETON FEATURE NAME");
+                System.out.println("# ========== ==== ========== ========= ============");
             }
             wlp.findFeatures(query)
-                    .sorted(sortOrder)
-                    .peek(trackVisibility)
-                    .map(this::displayName)
+                    .sorted(sortOrder())
+                    .peek(printVisibilityHeadings())
+                    .map(this::displayFeature)
                     .forEach(System.out::println);
+        }
+
+        private Comparator<Attributes> sortOrder() {
+            return flags.contains(Flag.SIMPLE_SORT)
+                    ? comparing(this::featureName)
+                    : comparing(Visibility::from).thenComparing(this::featureName);
+        }
+
+        private Consumer<Attributes> printVisibilityHeadings() {
+            // Disable headings if using simple-sort or printing feature qualifiers
+            if (flags.contains(Flag.SIMPLE_SORT) || flags.contains(Flag.DECORATE)) return feature -> {};
+            // Use a 'holder' to track the previous visibility
+            Visibility[] currentVisibility = {null};
+            return feature -> {
+                Visibility newVis = Visibility.from(feature);
+                if (newVis != currentVisibility[0]) {
+                    // the visibility has changed, so print out a heading
+                    System.out.printf("[%s FEATURES]%n", newVis);
+                    currentVisibility[0] = newVis;
+                }
+                System.out.print("  ");
+            };
         }
 
         private static void printUsage() {
@@ -204,9 +210,10 @@
             }
         }
 
-        String displayName(Attributes feature) {
+        String displayFeature(Attributes feature) {
             final String prefix = flags.contains(Flag.DECORATE)
-                    ? " "
+                    ? "  "
+                    + Visibility.from(feature).format()
                     + Key.IBM_PROVISION_CAPABILITY.get(feature).map(s -> " auto").orElse("     ")
                     + Key.SUBSYSTEM_SYMBOLICNAME.parseValues(feature).findFirst().map(v -> v.getQualifier("superseded")).filter(Boolean::valueOf).map(s -> " superseded").orElse("           ")
                     + Key.SUBSYSTEM_SYMBOLICNAME.parseValues(feature).findFirst().map(v -> v.getQualifier("singleton")).filter(Boolean::valueOf).map(s -> " singleton").orElse("          ")
@@ -229,9 +236,9 @@
 
         private void printDeps() {
             wlp.findFeatures(query)
-                    .peek(f -> System.out.printf("[%s]%n", displayName(f)))
+                    .peek(f -> System.out.printf("[%s]%n", displayFeature(f)))
                     .flatMap(wlp::dependentFeatures)
-                    .map(lfe.this::displayName)
+                    .map(lfe.this::displayFeature)
                     .forEach(n -> System.out.printf("\t%s%n", n));
         }
 
@@ -250,7 +257,7 @@
         void printTolerantFeatures(WLP wlp) {
             // print all features that tolerate other features
             String[] featureName = {null};
-            Consumer<Attributes> recordFeatureName = f -> featureName[0] = displayName(f);
+            Consumer<Attributes> recordFeatureName = f -> featureName[0] = displayFeature(f);
             Consumer<ValueElement> reportFeatureName = s -> {
                 if (featureName[0] == null) return;
                 System.out.printf("===%s===%n", featureName[0]);
@@ -367,7 +374,7 @@
                         .orElse(Visibility.DEFAULT);
             }
 
-
+            String format() { return String.format("%-10s", name().toLowerCase()); }
 
             public boolean test(Attributes feature) { return this == from(feature); }
         }
