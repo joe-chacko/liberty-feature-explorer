@@ -53,6 +53,7 @@
                     + "%n\t\t\tsingleton - only one version of this feature can be installed per server"
             ),
             FULL_NAMES("Always use the symbolic name of the feature, even if it has a short name."),
+            TAB_DELIMITERS("Suppress headers and use tabs to delimit fields to aid scripting. Implies --decorate.") { void addTo(Set<Flag> flags) { super.addTo(flags); DECORATE.addTo(flags); }},
             SIMPLE_SORT("Sort by full name. Do not categorise by visibility. Implies --full-names.") { void addTo(Set<Flag> flags) { super.addTo(flags); FULL_NAMES.addTo(flags); }},
             WARN_MISSING("Warn if any features are referenced but not present."),
             TERMINATOR("Explicitly terminate the flags so that the following argument is interpreted as a query.") {String toArg() { return "--"; }},
@@ -160,7 +161,8 @@
                 case WARN_MISSING: wlp.warnMissingFeatures();break;
             }
 
-            if (flags.contains(Flag.DECORATE)) { // print some heading columns first
+            if (flags.contains(Flag.DECORATE) && !!! flags.contains(Flag.TAB_DELIMITERS)) {
+                // print some heading columns first
                 System.out.println("# VISIBILITY AUTO SUPERSEDED SINGLETON FEATURE NAME");
                 System.out.println("# ========== ==== ========== ========= ============");
             }
@@ -211,13 +213,16 @@
         }
 
         String displayFeature(Attributes feature) {
+            final boolean useTabs = flags.contains(Flag.TAB_DELIMITERS);
+            final char DELIM = useTabs ? '\t' : ' ';
+            final String visibility = Visibility.from(feature).format();
             final String prefix = flags.contains(Flag.DECORATE)
-                    ? "  "
-                    + Visibility.from(feature).format()
-                    + Key.IBM_PROVISION_CAPABILITY.get(feature).map(s -> " auto").orElse("     ")
-                    + Key.SUBSYSTEM_SYMBOLICNAME.parseValues(feature).findFirst().map(v -> v.getQualifier("superseded")).filter(Boolean::valueOf).map(s -> " superseded").orElse("           ")
-                    + Key.SUBSYSTEM_SYMBOLICNAME.parseValues(feature).findFirst().map(v -> v.getQualifier("singleton")).filter(Boolean::valueOf).map(s -> " singleton").orElse("          ")
-                    + " "
+                    ? (useTabs ? "" : "  ") // indent unless using tabs
+                    + (useTabs ? visibility.trim() : visibility)
+                    + DELIM + Key.IBM_PROVISION_CAPABILITY.get(feature).map(s -> "auto").orElse("    ")
+                    + DELIM + Key.SUBSYSTEM_SYMBOLICNAME.parseValues(feature).findFirst().map(v -> v.getQualifier("superseded")).filter(Boolean::valueOf).map(s -> "superseded").orElse("          ")
+                    + DELIM + Key.SUBSYSTEM_SYMBOLICNAME.parseValues(feature).findFirst().map(v -> v.getQualifier("singleton")).filter(Boolean::valueOf).map(s -> "singleton").orElse("         ")
+                    + DELIM
                     : "";
             return prefix + featureName(feature);
         }
