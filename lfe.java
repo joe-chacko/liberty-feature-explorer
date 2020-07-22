@@ -32,30 +32,50 @@ import java.util.jar.Manifest;
 import java.util.regex.MatchResult;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
+
+import static java.util.Collections.unmodifiableMap;
+import static java.util.Comparator.comparing;
+import static java.util.stream.Collectors.joining;
 
 public class lfe {
     static final Path FEATURES_SUBDIR = Paths.get("lib/features");
 
     static class MisuseError extends Error { MisuseError(String message) { super(message); }}
 
-    enum Flag {WARN_MISSING_FEATURES, DENOTE_AUTO_FEATURES, DISPLAY_SHORTNAMES}
+    enum Flag {
+        HELP("Print this usage message."),
+        DECORATE("Mark features with special qualifiers as follows:\n"
+                + "\t\t\t[auto] auto-features are automatically enabled when certain combinations are in play\n"
+                + "\t\t\t[singleton] - singleton features must only have one version installed in any server\n"
+                + "\t\t\t[superseded] - features that have been superseded"
+        ),
+        FULL_NAMES("Always use the symbolic name of the feature, even if it has a short name"),
+        SIMPLE_SORT("Sort using displayed name only"),
+        WARN_MISSING("Warn if any features are referenced but not present"),
+        TERMINATOR("Explicitly terminate the flags so that the following argument is interpreted as a query") {String toArg() { return "--"; }},
+        NOT_A_FLAG(null),
+        UNKNOWN(null);
+        final String desc;
+        Flag(String desc) { this.desc = desc; }
+        String toArg() { return "--" + name().toLowerCase().replace('_', '-'); }
+        static final Map<String, Flag> argMap =
+                unmodifiableMap(publicFlags().collect(HashMap::new, (m, f) -> m.put(f.toArg(), f), Map::putAll));
+        static Stream<Flag> publicFlags() { return Stream.of(Flag.values()).filter(f -> f.desc != null); }
+        static Flag fromArg(String arg) { return arg.startsWith("--") ? argMap.getOrDefault(arg, UNKNOWN) : NOT_A_FLAG; }
+    }
 
     final WLP wlp;
     final EnumSet<Flag> flags ;
     final Pattern query;
-
+    final Comparator<Attributes> sortOrder;
 
     public static void main(String... args) throws Exception {
         try {
             new lfe(args).run();
-        } catch (MisuseError e) {
+        } catch (Error e) {
             System.err.println("ERROR: " + e.getMessage());
-            System.err.println();
-            System.err.println("Usage: " + lfe.class.getSimpleName() + " [--warn-missing-features] pattern");
-            System.err.println("Prints information about features when run from the root of an OpenLiberty installation.");
         }
     }
 
@@ -74,22 +94,12 @@ public class lfe {
 
         void parseOptions() {
             for (; argIndex < args.length; argIndex++) {
-                switch (args[argIndex]) {
-                    case "--warn-missing-features":
-                        flags.add(Flag.WARN_MISSING_FEATURES);
-                        break;
-                    case "--denote-auto-features":
-                        flags.add(Flag.DENOTE_AUTO_FEATURES);
-                        break;
-                    case "--display-shortnames":
-                        flags.add(Flag.DISPLAY_SHORTNAMES);
-                        break;
-                    case "--":
-                        ++argIndex;
-                        return;
-                    default:
-                        if (args[argIndex].startsWith("--")) throw new MisuseError("unknown flag or option '" + args[argIndex] + "'");
-                        return; // without incrementing i
+                final Flag flag = Flag.fromArg(args[argIndex]);
+                switch (flag) {
+                    default: flags.add(flag); break;
+                    case TERMINATOR: ++argIndex;
+                    case NOT_A_FLAG: return;
+                    case UNKNOWN: throw new MisuseError("unknown flag or option '" + args[argIndex] + "'");
                 }
             }
         }
@@ -99,7 +109,7 @@ public class lfe {
                             .peek(i -> argIndex = i)
                             .mapToObj(i -> args[i])
                             .map(lfe::globToRegex)
-                            .collect(Collectors.joining("|", "(?i:", ")")));
+                            .collect(joining("|", "(?i:", ")")));
         }
 
     }
@@ -109,7 +119,7 @@ public class lfe {
         this.flags = parser.flags;
         this.query = parser.query;
         this.wlp = new WLP();
-        if (flags.contains(Flag.WARN_MISSING_FEATURES)) wlp.warnMissingFeatures();
+        this.sortOrder = comparing(Visibility::from).thenComparing(this::featureName);
     }
 
     static String globToRegex(String glob) {
@@ -128,7 +138,39 @@ public class lfe {
     }
 
     void run() {
-        printMatchingFeatures(wlp, query);
+        for (Flag flag: flags) switch (flag) {
+            case HELP:
+                System.out.println("Usage: " + lfe.class.getSimpleName() + " [flag [flag ...] [--] <pattern> [pattern [pattern ...]]");
+                System.out.println("Prints information about features when run from the root of an OpenLiberty installation. " +
+                        "The patterns are treated as file glob patterns. " +
+                        "Asterisks match any text, and question marks match a single character. " +
+                        "If multiple patterns are specified, all features matching any pattern are listed.");
+                System.out.println("Flags:");
+                System.out.println(Flag.publicFlags()
+                        .map(f -> String.format("\t%s\n\t\t%s", f.toArg(), f.desc))
+                        .collect(joining("\n\n")));
+                return;
+            case WARN_MISSING:
+                wlp.warnMissingFeatures();
+                break;
+            default:
+                // other flags are used elsewhere
+                break;
+        }
+
+        Visibility[] currentVisibility = {null};
+        Consumer<Attributes> trackVisibility = f -> {
+            Visibility newVis = Visibility.from(f);
+            if (newVis == currentVisibility[0]) return;
+            currentVisibility[0] = newVis;
+            System.out.printf("[%s FEATURES]\n", newVis);
+
+        };
+        wlp.findFeatures(query)
+                .sorted(comparing(Visibility::from).thenComparing(this::featureName))
+                .peek(trackVisibility)
+                .map(this::displayName)
+                .forEach(System.out::println);
     }
 
     Attributes read(Path p) {
@@ -140,20 +182,17 @@ public class lfe {
     }
 
     String displayName(Attributes feature) {
-        final String auto = flags.contains(Flag.DENOTE_AUTO_FEATURES)
-                ? Key.IBM_PROVISION_CAPABILITY
-                .get(feature)
-                .map(s -> "*")
-                .orElse("")
+        final String prefix = flags.contains(Flag.DECORATE)
+                ? " "
+                + Key.IBM_PROVISION_CAPABILITY.get(feature).map(s -> " auto").orElse("     ")
+                + Key.SUBSYSTEM_SYMBOLICNAME.parseValues(feature).findFirst().map(v -> v.getQualifier("superseded")).filter(Boolean::valueOf).map(s -> " superseded").orElse("           ")
+                + Key.SUBSYSTEM_SYMBOLICNAME.parseValues(feature).findFirst().map(v -> v.getQualifier("singleton")).filter(Boolean::valueOf).map(s -> " singleton").orElse("          ")
+                + " "
                 : "";
-        final String shortName = flags.contains(Flag.DISPLAY_SHORTNAMES)
-                ? Key.IBM_SHORTNAME
-                .get(feature)
-                .map(s -> " \"" + s + "\"")
-                .orElse("")
-                : "";
-        return auto + fullName(feature) + shortName;
+        return prefix + featureName(feature);
     }
+
+    String featureName(Attributes feature) { return flags.contains(Flag.FULL_NAMES) ? fullName(feature) : shortName(feature); }
 
     String fullName(Attributes feature) {
         return Key.SUBSYSTEM_SYMBOLICNAME
@@ -162,6 +201,8 @@ public class lfe {
                 .get()
                 .id;
     }
+
+    String shortName(Attributes feature) { return Key.IBM_SHORTNAME.get(feature).orElseGet(() -> fullName(feature)); }
 
     private void printDeps() {
         wlp.findFeatures(query)
@@ -176,16 +217,10 @@ public class lfe {
                 .filter(Key.IBM_PROVISION_CAPABILITY)
                 .filter(Key.SUBSYSTEM_CONTENT)
                 .flatMap(Key.SUBSYSTEM_CONTENT::parseValues)
-                .filter(v -> !!! v.metadata.containsKey("type")) // find only the bundles
+                .filter(v -> !!! v.hasQualifier("type")) // find only the bundles
                 .peek(System.out::println)
                 .map(v -> v.id)
                 .collect(TreeSet::new, Set::add, Set::addAll) // use a TreeSet so it is sorted
-                .forEach(System.out::println);
-    }
-
-    void printMatchingFeatures(WLP wlp, Pattern p) {
-        wlp.findFeatures(p)
-                .map(this::displayName)
                 .forEach(System.out::println);
     }
 
@@ -202,19 +237,19 @@ public class lfe {
                 .peek(recordFeatureName)
                 .filter(Key.SUBSYSTEM_CONTENT)
                 .flatMap(Key.SUBSYSTEM_CONTENT::parseValues)
-                .filter(v -> v.metadata.containsKey("type"))
-                .filter(v -> v.metadata.containsKey("ibm.tolerates"))
-                .filter(v -> "osgi.subsystem.feature".equals(v.metadata.get("type")))
+                .filter(v -> v.hasQualifier("type"))
+                .filter(v -> v.hasQualifier("ibm.tolerates"))
+                .filter(v -> "osgi.subsystem.feature".equals(v.getQualifier("type")))
                 .peek(reportFeatureName)
                 .forEach(v -> {
-                    System.out.printf("\t%s (%s)%n", v.id, v.metadata.get("ibm.tolerates"));
+                    System.out.printf("\t%s (%s)%n", v.id, v.getQualifier("ibm.tolerates"));
                 });
     }
 
     static class ValueElement {
         static final Pattern ATOM_PATTERN = Pattern.compile("(([^\";\\\\]|\\\\.)+|\"([^\\\\\"]|\\\\.)*\")+");
         final String id;
-        final Map<? extends String, ? extends String> metadata;
+        private final Map<? extends String, String> qualifiers;
 
         ValueElement(String text) {
             Matcher m = ATOM_PATTERN.matcher(text);
@@ -226,13 +261,16 @@ public class lfe {
                 if (null != map.put(parts[0].trim(), parts[1].trim().replaceFirst("^\"(.*)\"$", "$1")))
                     System.err.printf("WARNING: duplicate metadata key '%s' detected in string '%s'", parts[0], text);
             }
-            this.metadata = Collections.unmodifiableMap(map);
-        }
-        @Override
-        public String toString() {
-            return String.format("%88s : %s", id, metadata);
+            this.qualifiers = unmodifiableMap(map);
         }
 
+        boolean hasQualifier(String key) { return qualifiers.containsKey(key); }
+
+        String getQualifier(String key) { return qualifiers.get(key); }
+
+        public String toString() {
+            return String.format("%88s : %s", id, qualifiers);
+        }
     }
 
     enum Key implements Function<Attributes, String>, Predicate<Attributes> {
@@ -292,23 +330,21 @@ public class lfe {
     }
 
     enum Visibility implements Predicate<Attributes> {
-        DEFAULT, PRIVATE, PROTECTED, PUBLIC;
-        static Pattern VISIBILITY_PATTERN = Pattern.compile(";visibility:=([^ ;]+)");
+        PUBLIC,
+        PROTECTED,
+        PRIVATE,
+        DEFAULT;
 
-        static Visibility valueOf(Attributes feature) {
-            return Key.SUBSYSTEM_SYMBOLICNAME.get(feature)
-                    .map(s -> s.replaceAll(" ", ""))
-                    .map(VISIBILITY_PATTERN::matcher)
-                    .map(Matcher::results)
-                    .orElse(Stream.empty())
+        static Visibility from(Attributes feature) {
+            return Key.SUBSYSTEM_SYMBOLICNAME.parseValues(feature)
                     .findFirst()
-                    .map(m -> m.group(1))
+                    .map(v -> v.getQualifier("visibility"))
                     .map(String::toUpperCase)
                     .map(Visibility::valueOf)
                     .orElse(Visibility.DEFAULT);
         }
 
-        public boolean test(Attributes feature) { return this == valueOf(feature); }
+        public boolean test(Attributes feature) { return this == from(feature); }
     }
 
     class WLP {
@@ -348,7 +384,7 @@ public class lfe {
                     .forEach(f -> {
                         String rootID = fullName(f);
                         Key.SUBSYSTEM_CONTENT.parseValues(f)
-                                .filter(v -> "osgi.subsystem.feature".equals(v.metadata.get("type")))
+                                .filter(v -> "osgi.subsystem.feature".equals(v.getQualifier("type")))
                                 .forEach(v -> {
                                     String depID = v.id;
                                     // check for non matching version and try tolerated versions instead
@@ -362,7 +398,7 @@ public class lfe {
             features()
                     .filter(Key.SUBSYSTEM_CONTENT)
                     .forEach(f -> Key.SUBSYSTEM_CONTENT.parseValues(f)
-                            .filter(v -> "osgi.subsystem.feature".equals(v.metadata.get("type")))
+                            .filter(v -> "osgi.subsystem.feature".equals(v.getQualifier("type")))
                             .map(v -> v.id)
                             .filter(id -> !!!featureMap.containsKey(id))
                             .forEach(id -> System.err.printf("WARNING: feature '%s' depends on absent feature '%s'. " +
@@ -378,7 +414,7 @@ public class lfe {
                     .filter(f -> Key.IBM_SHORTNAME.get(f)
                             .map(featurePattern::matcher)
                             .map(Matcher::matches)
-                            .filter(b -> b) // only consider actual matches
+                            .filter(Boolean::booleanValue) // discard non-matches
                             .orElse(Key.SUBSYSTEM_SYMBOLICNAME.parseValues(f)
                                     .findFirst()
                                     .map(v -> v.id)
@@ -389,7 +425,7 @@ public class lfe {
 
         public Stream<Attributes> dependentFeatures(Attributes rootFeature) {
             return Key.SUBSYSTEM_CONTENT.parseValues(rootFeature)
-                    .filter(v -> "osgi.subsystem.feature".equals(v.metadata.get("type")))
+                    .filter(v -> "osgi.subsystem.feature".equals(v.getQualifier("type")))
                     .map(v -> v.id)
                     .map(featureMap::get)
                     .filter(Objects::nonNull);
