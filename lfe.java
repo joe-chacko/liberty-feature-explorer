@@ -166,11 +166,9 @@
                 System.out.println("# VISIBILITY AUTO SUPERSEDED SINGLETON FEATURE NAME");
                 System.out.println("# ========== ==== ========== ========= ============");
             }
-            wlp.findFeatures(query)
-                    .sorted(sortOrder())
+            wlp.findFeatures(query, sortOrder())
                     .peek(printVisibilityHeadings())
-                    .map(this::displayFeature)
-                    .forEach(System.out::println);
+                    .forEach(f -> System.out.println(displayFeature(f)));
         }
 
         private Comparator<Attributes> sortOrder() {
@@ -238,48 +236,6 @@
         }
 
         String shortName(Attributes feature) { return Key.IBM_SHORTNAME.get(feature).orElseGet(() -> fullName(feature)); }
-
-        private void printDeps() {
-            wlp.findFeatures(query)
-                    .peek(f -> System.out.printf("[%s]%n", displayFeature(f)))
-                    .flatMap(wlp::dependentFeatures)
-                    .map(lfe.this::displayFeature)
-                    .forEach(n -> System.out.printf("\t%s%n", n));
-        }
-
-        void printBundlesIncludedInAutoFeatures(WLP wlp) {
-            wlp.features()
-                    .filter(Key.IBM_PROVISION_CAPABILITY)
-                    .filter(Key.SUBSYSTEM_CONTENT)
-                    .flatMap(Key.SUBSYSTEM_CONTENT::parseValues)
-                    .filter(v -> !!! v.hasQualifier("type")) // find only the bundles
-                    .peek(System.out::println)
-                    .map(v -> v.id)
-                    .collect(TreeSet::new, Set::add, Set::addAll) // use a TreeSet so it is sorted
-                    .forEach(System.out::println);
-        }
-
-        void printTolerantFeatures(WLP wlp) {
-            // print all features that tolerate other features
-            String[] featureName = {null};
-            Consumer<Attributes> recordFeatureName = f -> featureName[0] = displayFeature(f);
-            Consumer<ValueElement> reportFeatureName = s -> {
-                if (featureName[0] == null) return;
-                System.out.printf("===%s===%n", featureName[0]);
-                featureName[0] = null;
-            };
-            wlp.features()
-                    .peek(recordFeatureName)
-                    .filter(Key.SUBSYSTEM_CONTENT)
-                    .flatMap(Key.SUBSYSTEM_CONTENT::parseValues)
-                    .filter(v -> v.hasQualifier("type"))
-                    .filter(v -> v.hasQualifier("ibm.tolerates"))
-                    .filter(v -> "osgi.subsystem.feature".equals(v.getQualifier("type")))
-                    .peek(reportFeatureName)
-                    .forEach(v -> {
-                        System.out.printf("\t%s (%s)%n", v.id, v.getQualifier("ibm.tolerates"));
-                    });
-        }
 
         static class ValueElement {
             static final Pattern ATOM_PATTERN = Pattern.compile("(([^\";\\\\]|\\\\.)+|\"([^\\\\\"]|\\\\.)*\")+");
@@ -387,8 +343,11 @@
         class WLP {
             final Path root;
             final Path featureSubdir;
-            final Map<String, Attributes> featureMap = new TreeMap<>();
-            final Map<String, Attributes> shortNames = new TreeMap<>();
+            final Map<String, Attributes> featureMap = new HashMap<>();
+            final Map<String, Attributes> shortNames = new HashMap<>();
+            final Attributes[] features;
+            final Map<Attributes, Integer> featureIndex = new HashMap();
+            final BitSet[] dependencyMatrix;
 
             WLP() { this("."); }
 
@@ -415,24 +374,29 @@
                 } catch (IOException e) {
                     throw new IOError(e);
                 }
-                // follow dependencies
-                features()
+                // sort the features by full name
+                this.features = allFeatures().sorted(comparing(lfe.this::fullName)).toArray(Attributes[]::new);
+                // create a reverse look-up table for the array
+                for (int i = 0; i < features.length; i++) featureIndex.put(features[i], i);
+                // create an initially empty dependency matrix
+                this.dependencyMatrix = Stream.generate(() -> new BitSet(features.length)).limit(features.length).toArray(BitSet[]::new);
+                // add the dependencies
+                allFeatures()
                         .filter(Key.SUBSYSTEM_CONTENT)
                         .forEach(f -> {
-                            String rootID = fullName(f);
+                            BitSet dependencies = dependencyMatrix[featureIndex.get(f)];
                             Key.SUBSYSTEM_CONTENT.parseValues(f)
                                     .filter(v -> "osgi.subsystem.feature".equals(v.getQualifier("type")))
-                                    .forEach(v -> {
-                                        String depID = v.id;
-                                        // check for non matching version and try tolerated versions instead
-
-
-                                    });
+                                    .map(v -> v.id)
+                                    .map(featureMap::get)
+                                    .map(featureIndex::get)
+                                    .filter(Objects::nonNull) // ignore unknown features TODO: try tolerated versions instead
+                                    .forEach(dependencies::set);
                         });
             }
 
             void warnMissingFeatures() {
-                features()
+                allFeatures()
                         .filter(Key.SUBSYSTEM_CONTENT)
                         .sorted(comparing(lfe.this::fullName))
                         .forEach(f -> Key.SUBSYSTEM_CONTENT.parseValues(f)
@@ -444,29 +408,29 @@
                                         fullName(f), id)));
             }
 
-            Stream<Attributes> features() { return featureMap.values().stream(); }
+            Stream<Attributes> allFeatures() { return featureMap.values().stream(); }
 
-            public Stream<Attributes> findFeatures(Pattern featurePattern) {
-                return featureMap.values()
-                        .stream()
+            Stream<Attributes> findFeatures(Pattern simplePattern, Comparator<Attributes> sortOrder) {
+                return findFeatures(allFeatures(), simplePattern, sortOrder);
+            }
+
+            private Stream<Attributes> findFeatures(Stream<Attributes> features, Pattern simplePattern, Comparator<Attributes> sortOrder) {
+                return features
                         .filter(f -> Key.IBM_SHORTNAME.get(f)
-                                .map(featurePattern::matcher)
+                                .map(simplePattern::matcher)
                                 .map(Matcher::matches)
                                 .filter(Boolean::booleanValue) // discard non-matches
                                 .orElse(Key.SUBSYSTEM_SYMBOLICNAME.parseValues(f)
                                         .findFirst()
                                         .map(v -> v.id)
-                                        .map(featurePattern::matcher)
+                                        .map(simplePattern::matcher)
                                         .map(Matcher::matches)
-                                        .orElse(false)));
+                                        .orElse(false)))
+                        .sorted(sortOrder);
             }
 
-            public Stream<Attributes> dependentFeatures(Attributes rootFeature) {
-                return Key.SUBSYSTEM_CONTENT.parseValues(rootFeature)
-                        .filter(v -> "osgi.subsystem.feature".equals(v.getQualifier("type")))
-                        .map(v -> v.id)
-                        .map(featureMap::get)
-                        .filter(Objects::nonNull);
+            Stream<Attributes> dependentFeatures(Attributes rootFeature) {
+                return dependencyMatrix[featureIndex.get(rootFeature)].stream().mapToObj(i -> features[i]);
             }
         }
     }
