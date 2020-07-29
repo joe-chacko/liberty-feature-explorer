@@ -24,14 +24,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
-import java.util.function.Consumer;
-import java.util.function.Function;
-import java.util.function.Predicate;
+import java.util.function.*;
 import java.util.jar.Attributes;
 import java.util.jar.Manifest;
 import java.util.regex.MatchResult;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collector;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
@@ -56,6 +55,7 @@ public class lfe {
         ),
         FULL_NAMES("Always use the symbolic name of the feature, even if it has a short name."),
         TAB_DELIMITERS("Suppress headers and use tabs to delimit fields to aid scripting. Implies --decorate.") { void addTo(Set<Flag> flags) { super.addTo(flags); DECORATE.addTo(flags); }},
+        SHOW_PATHS("Display all matching dependency trees (paths if --tab-delimiters is specified)"),
         SIMPLE_SORT("Sort by full name. Do not categorise by visibility. Implies --full-names.") { void addTo(Set<Flag> flags) { super.addTo(flags); FULL_NAMES.addTo(flags); }},
         WARN_MISSING("Warn if any features are referenced but not present."),
         TERMINATOR("Explicitly terminate the flags so that the following argument is interpreted as a query.") {String toArg() { return "--"; }},
@@ -179,17 +179,58 @@ public class lfe {
             System.out.println("# VISIBILITY AUTO SUPERSEDED SINGLETON FEATURE NAME");
             System.out.println("# ========== ==== ========== ========= ============");
         }
-        wlp.findFeaturePaths(queries)
-                .map(Lists::last)
-                .sorted(featureOrdering)
-                .distinct()
-                .peek(printVisibilityHeadings())
-                .forEach(f -> System.out.println(displayFeature(f)));
+
+        final Consumer<Attributes> printVisibilityHeadings;
+        final String initialIndent;
+        if (usingHeadings()) {
+            printVisibilityHeadings = printVisibilityHeadings();
+            initialIndent = "  ";
+        } else {
+            printVisibilityHeadings = f -> {};
+            initialIndent = "";
+        }
+
+        if (flags.contains(Flag.SHOW_PATHS)) {
+            if (flags.contains(Flag.TAB_DELIMITERS)) wlp.findFeaturePaths(queries)
+                    .sorted(pathOrdering)
+                    .distinct()
+                    .forEach(path -> {
+                        String indent = path.stream()
+                                .map(this::featureName)
+                                .collect(joining("/"))
+                                .replaceFirst("[^/]*$", "");
+                        System.out.println(displayFeature(path.get(path.size() - 1), indent));
+                    });
+            else wlp.findFeaturePaths(queries)
+                    .sorted(pathOrdering)
+                    .distinct()
+                    .collect(Streams.forEachWithContext(prev -> curr -> next -> {
+                        printVisibilityHeadings.accept(curr.get(0));
+                        String indent = initialIndent;
+                        boolean matchPrev = true;
+                        for (int i = 0; i < curr.size(); i++) {
+                            var p = prev == null || prev.size() < i ? null : prev.get(i);
+                            var c = curr.get(i);
+                            var n = next == null || next.size() < i ? null : next.get(i);
+
+                            matchPrev &= p == c;
+
+                            if (!matchPrev) System.out.println(displayFeature(c, indent));
+                            indent += "  ";
+                        }
+                    }));
+        } else {
+            wlp.findFeaturePaths(queries)
+                    .map(Lists::last)
+                    .sorted(featureOrdering)
+                    .distinct()
+                    .peek(printVisibilityHeadings)
+                    .forEach(f -> System.out.println(displayFeature(f, initialIndent)));
+
+        }
     }
 
     private Consumer<Attributes> printVisibilityHeadings() {
-        // Disable headings if using simple-sort or printing feature qualifiers
-        if (flags.contains(Flag.SIMPLE_SORT) || flags.contains(Flag.DECORATE)) return feature -> {};
         // Use a 'holder' to track the previous visibility
         Visibility[] currentVisibility = {null};
         return feature -> {
@@ -199,9 +240,10 @@ public class lfe {
                 System.out.printf("[%s FEATURES]%n", newVis);
                 currentVisibility[0] = newVis;
             }
-            System.out.print("  ");
         };
     }
+
+    private boolean usingHeadings() { return !!! flags.contains(Flag.SIMPLE_SORT) && !!! flags.contains(Flag.DECORATE); }
 
     private static void printUsage() {
         final String cmd = lfe.class.getSimpleName();
@@ -231,7 +273,7 @@ public class lfe {
         }
     }
 
-    String displayFeature(Attributes feature) {
+    String displayFeature(Attributes feature, String indent) {
         final boolean useTabs = flags.contains(Flag.TAB_DELIMITERS);
         final char DELIM = useTabs ? '\t' : ' ';
         final String visibility = Visibility.from(feature).format();
@@ -243,7 +285,7 @@ public class lfe {
                 + DELIM + Key.SUBSYSTEM_SYMBOLICNAME.parseValues(feature).findFirst().map(v -> v.getQualifier("singleton")).filter(Boolean::valueOf).map(s -> "singleton").orElse("         ")
                 + DELIM
                 : "";
-        return prefix + featureName(feature);
+        return prefix + indent + featureName(feature);
     }
 
     String featureName(Attributes feature) { return flags.contains(Flag.FULL_NAMES) ? fullName(feature) : shortName(feature); }
@@ -483,6 +525,43 @@ public class lfe {
                 }
                 return l1.size() - l2.size();
             };
+        }
+    }
+
+    enum Streams {
+        ;
+
+        static class ContextHolder<T>{
+            final Function<T, Function<T, Consumer<T>>> before;
+            Function<T, Consumer<T>> between;
+            Consumer<T> after = t -> {};
+
+            ContextHolder(Function<T, Function<T, Consumer<T>>> before) {
+                this.before = before;
+                this.between = before.apply(null);
+                this.after = t -> {};
+            }
+
+            public void receive(T t) {
+                after.accept(t); // invoke with third param
+                after = between.apply(t); // curry second param
+                between = before.apply(t); // curry first param
+            }
+            public Void finish() { receive(null); return null; }
+        }
+
+        static class ContextCollector<T> implements Collector<T, ContextHolder<T>, Void> {
+            final Function<T, Function<T, Consumer<T>>> before;
+            ContextCollector(Function<T, Function<T, Consumer<T>>> before) { this.before = before; }
+            public Supplier<ContextHolder<T>> supplier() { return () -> new ContextHolder<T>(before); }
+            public BiConsumer<ContextHolder<T>, T> accumulator() { return ContextHolder::receive; }
+            public BinaryOperator<ContextHolder<T>> combiner() { return (x1, x2) -> {throw new UnsupportedOperationException("");}; }
+            public Function<ContextHolder<T>, Void> finisher() { return ContextHolder::finish; }
+            public Set<Characteristics> characteristics() { return Collections.emptySet(); }
+        };
+
+        static <T> Collector<T, ?, Void> forEachWithContext(Function <T, Function<T, Consumer<T>>> before) {
+            return new ContextCollector<T>(before);
         }
     }
 
