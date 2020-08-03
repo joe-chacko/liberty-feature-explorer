@@ -30,7 +30,6 @@ import java.util.jar.Manifest;
 import java.util.regex.MatchResult;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Collector;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
@@ -191,41 +190,76 @@ public class lfe {
         }
 
         if (flags.contains(Flag.SHOW_PATHS)) {
-            if (flags.contains(Flag.TAB_DELIMITERS)) wlp.findFeaturePaths(queries)
-                    .sorted(pathOrdering)
-                    .distinct()
-                    .forEach(path -> {
-                        String indent = path.stream()
-                                .map(this::featureName)
-                                .collect(joining("/"))
-                                .replaceFirst("[^/]*$", "");
-                        System.out.println(displayFeature(path.get(path.size() - 1), indent));
-                    });
-            else wlp.findFeaturePaths(queries)
-                    .sorted(pathOrdering)
-                    .distinct()
-                    .collect(Streams.forEachWithContext(prev -> curr -> next -> {
-                        printVisibilityHeadings.accept(curr.get(0));
-                        String indent = initialIndent;
-                        boolean matchPrev = true;
-                        for (int i = 0; i < curr.size(); i++) {
-                            var p = prev == null || prev.size() < i ? null : prev.get(i);
-                            var c = curr.get(i);
-                            var n = next == null || next.size() < i ? null : next.get(i);
+            if (flags.contains(Flag.TAB_DELIMITERS)) {
+                wlp.findFeaturePaths(queries)
+                        .sorted(pathOrdering)
+                        .distinct()
+                        .forEach(path -> {
+                            String indent = path.stream()
+                                    .map(this::featureName)
+                                    .collect(joining("/"))
+                                    .replaceFirst("[^/]*$", "");
+                            System.out.println(formatFeature(indent, path.get(path.size() - 1)));
+                        });
+            } else {
+                class TreeNode<V> {
+                    final V value;
+                    final Map<V, TreeNode<V>> children = new LinkedHashMap<>();
 
-                            matchPrev &= p == c;
+                    TreeNode() { this(null); } // root node
 
-                            if (!matchPrev) System.out.println(displayFeature(c, indent));
-                            indent += "  ";
-                        }
-                    }));
+                    TreeNode(V value) { this.value = value; }
+
+                    private TreeNode getChild(V value) { return children.computeIfAbsent(value, TreeNode::new); }
+
+                    void addPath(List<V> path) {
+                        TreeNode n = this;
+                        for (V elem: path) n = n.getChild(elem);
+                    }
+
+                    void combine(TreeNode<V> that) { throw new UnsupportedOperationException("Parallelism not supported here"); }
+
+                    void traverseDepthFirst(String prefix, Consumer<V> rootAction, Function<String, Consumer<V>> action) {
+                        final Consumer<V> fmt = action.apply(prefix);
+                        children.values()
+                                .stream()
+                                .peek(n -> rootAction.accept(n.value))
+                                .peek(n -> fmt.accept(n.value))
+                                .forEach(n -> n.traverseDepthFirst(prefix, action));
+                    }
+
+                    void traverseDepthFirst(String prefix, Function<String, Consumer<V>> formatter) {
+                        if (children.isEmpty()) return;
+                        final Consumer<V> printChild = formatter.apply(prefix + "\u2560\u2550");
+                        children.values()
+                                .stream()
+                                .limit(children.size() - 1)
+                                .peek(n -> printChild.accept(n.value))
+                                .forEach(n -> n.traverseDepthFirst(prefix + "\u2551 ", formatter));
+                        // now format the last child: not efficient, but accurate and terse(ish)
+                        children.values()
+                                .stream()
+                                .skip(children.size() - 1)
+                                .peek(n -> formatter.apply(prefix + "\u255A\u2550").accept(n.value))
+                                .forEach(n -> n.traverseDepthFirst(prefix + "  ", formatter));
+                    }
+                }
+                wlp.findFeaturePaths(queries)
+                        .sorted(pathOrdering)
+                        .distinct()
+                        // collect these into a tree structure
+                        .collect(TreeNode<Attributes>::new, TreeNode::addPath, TreeNode::combine)
+                        // print the tree in ASCII
+                        .traverseDepthFirst(initialIndent, printVisibilityHeadings,
+                                prefix -> feature -> System.out.println(formatFeature(prefix, feature)));
+            }
         } else {
             wlp.findFeaturePaths(queries)
                     .map(Lists::last)
                     .sorted(featureOrdering)
                     .distinct()
                     .peek(printVisibilityHeadings)
-                    .forEach(f -> System.out.println(displayFeature(f, initialIndent)));
+                    .forEach(f -> System.out.println(formatFeature(initialIndent, f)));
 
         }
     }
@@ -273,11 +307,11 @@ public class lfe {
         }
     }
 
-    String displayFeature(Attributes feature, String indent) {
+    String formatFeature(String prefix, Attributes feature) {
         final boolean useTabs = flags.contains(Flag.TAB_DELIMITERS);
         final char DELIM = useTabs ? '\t' : ' ';
         final String visibility = Visibility.from(feature).format();
-        final String prefix = flags.contains(Flag.DECORATE)
+        final String qualifiers = flags.contains(Flag.DECORATE)
                 ? (useTabs ? "" : "  ") // indent unless using tabs
                 + (useTabs ? visibility.trim() : visibility)
                 + DELIM + Key.IBM_PROVISION_CAPABILITY.get(feature).map(s -> "auto").orElse("    ")
@@ -285,7 +319,7 @@ public class lfe {
                 + DELIM + Key.SUBSYSTEM_SYMBOLICNAME.parseValues(feature).findFirst().map(v -> v.getQualifier("singleton")).filter(Boolean::valueOf).map(s -> "singleton").orElse("         ")
                 + DELIM
                 : "";
-        return prefix + indent + featureName(feature);
+        return qualifiers + prefix + featureName(feature);
     }
 
     String featureName(Attributes feature) { return flags.contains(Flag.FULL_NAMES) ? fullName(feature) : shortName(feature); }
@@ -525,43 +559,6 @@ public class lfe {
                 }
                 return l1.size() - l2.size();
             };
-        }
-    }
-
-    enum Streams {
-        ;
-
-        static class ContextHolder<T>{
-            final Function<T, Function<T, Consumer<T>>> before;
-            Function<T, Consumer<T>> between;
-            Consumer<T> after = t -> {};
-
-            ContextHolder(Function<T, Function<T, Consumer<T>>> before) {
-                this.before = before;
-                this.between = before.apply(null);
-                this.after = t -> {};
-            }
-
-            public void receive(T t) {
-                after.accept(t); // invoke with third param
-                after = between.apply(t); // curry second param
-                between = before.apply(t); // curry first param
-            }
-            public Void finish() { receive(null); return null; }
-        }
-
-        static class ContextCollector<T> implements Collector<T, ContextHolder<T>, Void> {
-            final Function<T, Function<T, Consumer<T>>> before;
-            ContextCollector(Function<T, Function<T, Consumer<T>>> before) { this.before = before; }
-            public Supplier<ContextHolder<T>> supplier() { return () -> new ContextHolder<T>(before); }
-            public BiConsumer<ContextHolder<T>, T> accumulator() { return ContextHolder::receive; }
-            public BinaryOperator<ContextHolder<T>> combiner() { return (x1, x2) -> {throw new UnsupportedOperationException("");}; }
-            public Function<ContextHolder<T>, Void> finisher() { return ContextHolder::finish; }
-            public Set<Characteristics> characteristics() { return Collections.emptySet(); }
-        };
-
-        static <T> Collector<T, ?, Void> forEachWithContext(Function <T, Function<T, Consumer<T>>> before) {
-            return new ContextCollector<T>(before);
         }
     }
 
