@@ -57,6 +57,7 @@ public class lfe {
         SHOW_PATHS("Display all matching dependency trees (paths if --tab-delimiters is specified)"),
         SIMPLE_SORT("Sort by full name. Do not categorise by visibility. Implies --full-names.") { void addTo(Set<Flag> flags) { super.addTo(flags); FULL_NAMES.addTo(flags); }},
         WARN_MISSING("Warn if any features are referenced but not present."),
+        IGNORE_DUPLICATES("Do NOT report duplicate feature attributes (e..g short names)."),
         TERMINATOR("Explicitly terminate the flags so that the following argument is interpreted as a query.") {String toArg() { return "--"; }},
         NOT_A_FLAG(null),
         UNKNOWN(null);
@@ -348,6 +349,7 @@ public class lfe {
             while(m.find(m.end())) {
                 String[] parts = m.group().split(":?=", 2);
                 if (null != map.put(parts[0].trim(), parts[1].trim().replaceFirst("^\"(.*)\"$", "$1")))
+                    // TODO: silence this warning if the ignore-duplicates flag has been passed
                     System.err.printf("WARNING: duplicate metadata key '%s' detected in string '%s'", parts[0], text);
             }
             this.qualifiers = unmodifiableMap(map);
@@ -423,6 +425,7 @@ public class lfe {
         PUBLIC,
         PROTECTED,
         PRIVATE,
+        INSTALL,
         DEFAULT;
 
         static Visibility from(Attributes feature) {
@@ -462,10 +465,12 @@ public class lfe {
                         .map(lfe.this::read)
                         .forEach(f -> {
                             if (null != featureMap.put(fullName(f), f))
-                                System.err.println("WARNING: duplicate symbolic name found: " + Key.SUBSYSTEM_SYMBOLICNAME.get(f));
+                                if (!flags.contains(Flag.IGNORE_DUPLICATES))
+                                    System.err.println("WARNING: duplicate symbolic name found: " + Key.SUBSYSTEM_SYMBOLICNAME.get(f));
                             Key.IBM_SHORTNAME.get(f).ifPresent(shortName -> {
                                 if (null != shortNames.put(shortName, f))
-                                    System.err.println("WARNING: duplicate short name found: " + shortName);
+                                    if (!flags.contains(Flag.IGNORE_DUPLICATES))
+                                        System.err.println("WARNING: duplicate short name found: " + shortName);
                             });
                         });
             } catch (IOException e) {
