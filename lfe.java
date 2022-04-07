@@ -16,6 +16,7 @@
  * =============================================================================
  */
 
+
 import java.io.FileInputStream;
 import java.io.IOError;
 import java.io.IOException;
@@ -23,8 +24,22 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.*;
-import java.util.function.*;
+import java.util.ArrayList;
+import java.util.BitSet;
+import java.util.Comparator;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Scanner;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.jar.Attributes;
 import java.util.jar.Manifest;
 import java.util.regex.MatchResult;
@@ -33,54 +48,62 @@ import java.util.regex.Pattern;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
-import static java.util.Collections.unmodifiableList;
+import static java.util.Arrays.stream;
 import static java.util.Collections.unmodifiableMap;
 import static java.util.Comparator.comparing;
 import static java.util.List.copyOf;
+import static java.util.function.Predicate.not;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toUnmodifiableList;
 
-public class lfe {
+public final class lfe {
     static final Path FEATURES_SUBDIR = Paths.get("lib/features");
     static class MisuseError extends Error { MisuseError(String message) { super(message); }}
 
-    enum Flag {
+    interface Opt<O extends Opt<O>> {
+        String name();
+        String desc();
+        Stream<Opt<O>> implied();
+        default void addTo(Set<O> set) { set.add((O)this); implied().forEach(i -> i.addTo(set));}
+        default String toArg() { return "--" + name().toLowerCase().replace('_', '-'); }
+        /** Provides an indented (possibly multi-line) description suitable for printing on a line by itself */
+        default String describe() {
+            String separator = toArg().length() < 8 ? "\t" : String.format("%n\t\t");
+            return String.format("\t%s%s%s", toArg(), separator, desc())
+            + Optional.of(implied().map(Opt::toArg).collect(joining(" and ")))
+                    .filter(not(String::isEmpty))
+                    .map(s -> " Implies " + s + ".")
+                    .orElse("");
+        }
+    }
+
+    enum Flag implements Opt<Flag> {
         HELP("Print this usage message."),
         DECORATE("Mark features with special qualifiers as follows:"
                 + "%n\t\t\tpublic|private|protected - the declared visibility"
                 + "%n\t\t\tauto - feature automatically enabled in certain conditions"
                 + "%n\t\t\tsuperseded - has been superseded by another feature"
-                + "%n\t\t\tsingleton - only one version of this feature can be installed per server"
-        ),
+                + "%n\t\t\tsingleton - only one version of this feature can be installed per server"),
         FULL_NAMES("Always use the symbolic name of the feature, even if it has a short name."),
-        TAB_DELIMITERS("Suppress headers and use tabs to delimit fields to aid scripting. Implies --decorate.") { void addTo(Set<Flag> flags) { super.addTo(flags); DECORATE.addTo(flags); }},
+        TAB_DELIMITERS("Suppress headers and use tabs to delimit fields to aid scripting.", DECORATE),
         SHOW_PATHS("Display all matching dependency trees (paths if --tab-delimiters is specified)"),
-        SIMPLE_SORT("Sort by full name. Do not categorise by visibility. Implies --full-names.") { void addTo(Set<Flag> flags) { super.addTo(flags); FULL_NAMES.addTo(flags); }},
+        SIMPLE_SORT("Sort by full name. Do not categorise by visibility.", FULL_NAMES),
         WARN_MISSING("Warn if any features are referenced but not present."),
         IGNORE_DUPLICATES("Do NOT report duplicate feature attributes (e..g short names)."),
-        TERMINATOR("Explicitly terminate the flags so that the following argument is interpreted as a query.") {String toArg() { return "--"; }},
+        TERMINATOR("Explicitly terminate the flags so that the following argument is interpreted as a query.") {public String toArg() { return "--"; }},
         NOT_A_FLAG(null),
         UNKNOWN(null);
-
         final String desc;
-        Flag(String desc) { this.desc = Optional.ofNullable(desc).map(String::format).orElse(null); }
+        final Flag[] impliedFlags;
+        Flag(String desc, Flag...impliedFlags) {
+            this.desc = Optional.ofNullable(desc).map(String::format).orElse(null);
+            this.impliedFlags = impliedFlags;
+        }
+        public String desc() { return desc; }
+        public Stream<Opt<Flag>> implied() { return stream(impliedFlags); }
         /** Provides a multi-line description of all (public) flags */
-        static String describeAll() {
-            return String.format(publicFlags().map(Flag::describe).collect(joining("%n%n", "Flags:%n", "")));
-        }
-
-        /** Provides an indented (possibly multi-line) description suitable for printing on a line by itself */
-        private String describe() {
-            String arg = toArg();
-            String separator = arg.length() < 8 ? "\t" : String.format("%n\t\t");
-            return String.format("\t%s%s%s", arg, separator, this.desc);
-        }
-
-        void addTo(Set<Flag> flags) { flags.add(this); }
-
-        String toArg() { return "--" + name().toLowerCase().replace('_', '-'); }
-        static final Map<String, Flag> argMap =
-                unmodifiableMap(publicFlags().collect(HashMap::new, (m, f) -> m.put(f.toArg(), f), Map::putAll));
+        static String describeAll() { return String.format(publicFlags().map(Flag::describe).collect(joining("%n%n", "Flags:%n", ""))); }
+        static final Map<String, Flag> argMap = unmodifiableMap(publicFlags().collect(HashMap::new, (m, f) -> m.put(f.toArg(), f), Map::putAll));
         static Stream<Flag> publicFlags() { return Stream.of(Flag.values()).filter(f -> f.desc != null); }
         static Flag fromArg(String arg) { return arg.startsWith("--") ? argMap.getOrDefault(arg, UNKNOWN) : NOT_A_FLAG; }
     }
@@ -102,7 +125,7 @@ public class lfe {
         }
     }
 
-    static class ArgParser {
+    static final class ArgParser {
         final EnumSet<Flag> flags = EnumSet.noneOf(Flag.class);
         final List<List<Pattern>> query;
         final String[] args;
@@ -119,10 +142,10 @@ public class lfe {
             for (; argIndex < args.length; argIndex++) {
                 final Flag flag = Flag.fromArg(args[argIndex]);
                 switch (flag) {
-                    default: flag.addTo(flags); break;
-                    case TERMINATOR: ++argIndex;
+                    case TERMINATOR: ++argIndex; return;
                     case NOT_A_FLAG: return;
                     case UNKNOWN: throw new MisuseError("unknown flag or option '" + args[argIndex] + "'");
+                    default: flag.addTo(flags); break;
                 }
             }
         }
@@ -131,10 +154,10 @@ public class lfe {
             return IntStream.range(argIndex, args.length)
                     .peek(i -> argIndex = i)
                     .mapToObj(i -> args[i])
-                    .map(this::parseQuery).collect(toUnmodifiableList());
+                    .map(ArgParser::parseQuery).collect(toUnmodifiableList());
         }
 
-        private List<Pattern> parseQuery(String s) {
+        private static List<Pattern> parseQuery(String s) {
             return Stream.of(s.split("/"))
                     .map(lfe::globToRegex)
                     .map(Pattern::compile).collect(toUnmodifiableList());
@@ -153,42 +176,35 @@ public class lfe {
     }
 
     static String globToRegex(String glob) {
-        var scanner = new Scanner(glob);
-        var sb = new StringBuilder();
-        scanner.useDelimiter("((?<=[?*])|(?=[?*]))"); // delimit immediately before and/or after a * or ?
-        while (scanner.hasNext()) {
-            String token = scanner.next();
-            switch (token) {
-                case "?": sb.append("."); break;
-                case "*": sb.append(".*"); break;
-                default: sb.append(Pattern.quote(token));
+        try (var scanner = new Scanner(glob)) {
+            var sb = new StringBuilder();
+            scanner.useDelimiter("((?<=[?*])|(?=[?*]))"); // delimit immediately before and/or after a * or ?
+            while (scanner.hasNext()) {
+                String token = scanner.next();
+                switch (token) {
+                    case "?":
+                        sb.append(".");
+                        break;
+                    case "*":
+                        sb.append(".*");
+                        break;
+                    default:
+                        sb.append(Pattern.quote(token));
+                }
             }
+            return sb.toString();
         }
-        return sb.toString();
     }
 
     void run() {
         // some flags need processing up front
-        for (Flag flag: flags) switch (flag) {
-            case HELP: printUsage(); return;
-            case WARN_MISSING: wlp.warnMissingFeatures();break;
-        }
+        if (flags.contains(Flag.HELP)) { printUsage(); return; }
+        if (flags.contains(Flag.WARN_MISSING)) wlp.warnMissingFeatures();
 
-        if (flags.contains(Flag.DECORATE) && !!! flags.contains(Flag.TAB_DELIMITERS)) {
-            // print some heading columns first
-            System.out.println("# VISIBILITY AUTO SUPERSEDED SINGLETON FEATURE NAME");
-            System.out.println("# ========== ==== ========== ========= ============");
-        }
+        printHeadersIfNeeded();
 
-        final Consumer<Attributes> printVisibilityHeadings;
-        final String initialIndent;
-        if (usingHeadings()) {
-            printVisibilityHeadings = printVisibilityHeadings();
-            initialIndent = "  ";
-        } else {
-            printVisibilityHeadings = f -> {};
-            initialIndent = "";
-        }
+        final Consumer<Attributes> printVisibilityHeadings = usingHeadings() ? printVisibilityHeadings() : (f -> {});
+        final String initialIndent = usingHeadings() ? "  " : "";
 
         if (flags.contains(Flag.SHOW_PATHS)) {
             if (flags.contains(Flag.TAB_DELIMITERS)) {
@@ -203,48 +219,6 @@ public class lfe {
                             System.out.println(formatFeature(indent, path.get(path.size() - 1)));
                         });
             } else {
-                class TreeNode<V> {
-                    final V value;
-                    final Map<V, TreeNode<V>> children = new LinkedHashMap<>();
-
-                    TreeNode() { this(null); } // root node
-
-                    TreeNode(V value) { this.value = value; }
-
-                    private TreeNode getChild(V value) { return children.computeIfAbsent(value, TreeNode::new); }
-
-                    void addPath(List<V> path) {
-                        TreeNode n = this;
-                        for (V elem: path) n = n.getChild(elem);
-                    }
-
-                    void combine(TreeNode<V> that) { throw new UnsupportedOperationException("Parallelism not supported here"); }
-
-                    void traverseDepthFirst(String prefix, Consumer<V> rootAction, Function<String, Consumer<V>> action) {
-                        final Consumer<V> fmt = action.apply(prefix);
-                        children.values()
-                                .stream()
-                                .peek(n -> rootAction.accept(n.value))
-                                .peek(n -> fmt.accept(n.value))
-                                .forEach(n -> n.traverseDepthFirst(prefix, action));
-                    }
-
-                    void traverseDepthFirst(String prefix, Function<String, Consumer<V>> formatter) {
-                        if (children.isEmpty()) return;
-                        final Consumer<V> printChild = formatter.apply(prefix + "\u2560\u2550");
-                        children.values()
-                                .stream()
-                                .limit(children.size() - 1)
-                                .peek(n -> printChild.accept(n.value))
-                                .forEach(n -> n.traverseDepthFirst(prefix + "\u2551 ", formatter));
-                        // now format the last child: not efficient, but accurate and terse(ish)
-                        children.values()
-                                .stream()
-                                .skip(children.size() - 1)
-                                .peek(n -> formatter.apply(prefix + "\u255A\u2550").accept(n.value))
-                                .forEach(n -> n.traverseDepthFirst(prefix + "  ", formatter));
-                    }
-                }
                 wlp.findFeaturePaths(queries)
                         .sorted(pathOrdering)
                         .distinct()
@@ -265,7 +239,15 @@ public class lfe {
         }
     }
 
-    private Consumer<Attributes> printVisibilityHeadings() {
+    private void printHeadersIfNeeded() {
+        if (flags.contains(Flag.DECORATE) && ! flags.contains(Flag.TAB_DELIMITERS)) {
+            // print some heading columns first
+            System.out.println("# VISIBILITY AUTO SUPERSEDED SINGLETON FEATURE NAME");
+            System.out.println("# ========== ==== ========== ========= ============");
+        }
+    }
+
+    private static Consumer<Attributes> printVisibilityHeadings() {
         // Use a 'holder' to track the previous visibility
         Visibility[] currentVisibility = {null};
         return feature -> {
@@ -278,7 +260,7 @@ public class lfe {
         };
     }
 
-    private boolean usingHeadings() { return !!! flags.contains(Flag.SIMPLE_SORT) && !!! flags.contains(Flag.DECORATE); }
+    private boolean usingHeadings() { return ! flags.contains(Flag.SIMPLE_SORT) && ! flags.contains(Flag.DECORATE); }
 
     private static void printUsage() {
         final String cmd = lfe.class.getSimpleName();
@@ -300,7 +282,7 @@ public class lfe {
         System.out.println("\t\tList all features that javaee-8.0 depends on.");
     }
 
-    Attributes read(Path p) {
+    static Attributes read(Path p) {
         try (InputStream in = new FileInputStream(p.toFile())) {
             return new Manifest(in).getMainAttributes();
         } catch (IOException e) {
@@ -311,10 +293,11 @@ public class lfe {
     String formatFeature(String prefix, Attributes feature) {
         final boolean useTabs = flags.contains(Flag.TAB_DELIMITERS);
         final char DELIM = useTabs ? '\t' : ' ';
-        final String visibility = Visibility.from(feature).format();
+        final String visibility = Visibility.from(feature).format(useTabs);
+        String indent = useTabs ? "" : "  ";
         final String qualifiers = flags.contains(Flag.DECORATE)
-                ? (useTabs ? "" : "  ") // indent unless using tabs
-                + (useTabs ? visibility.trim() : visibility)
+                ? indent
+                + visibility
                 + DELIM + Key.IBM_PROVISION_CAPABILITY.get(feature).map(s -> "auto").orElse("    ")
                 + DELIM + Key.SUBSYSTEM_SYMBOLICNAME.parseValues(feature).findFirst().map(v -> v.getQualifier("superseded")).filter(Boolean::valueOf).map(s -> "superseded").orElse("          ")
                 + DELIM + Key.SUBSYSTEM_SYMBOLICNAME.parseValues(feature).findFirst().map(v -> v.getQualifier("singleton")).filter(Boolean::valueOf).map(s -> "singleton").orElse("         ")
@@ -325,25 +308,64 @@ public class lfe {
 
     String featureName(Attributes feature) { return flags.contains(Flag.FULL_NAMES) ? fullName(feature) : shortName(feature); }
 
-    @SuppressWarnings("OptionalGetWithoutIsPresent")
-    String fullName(Attributes feature) {
+    static String fullName(Attributes feature) {
         return Key.SUBSYSTEM_SYMBOLICNAME
                 .parseValues(feature)
                 .findFirst()
-                .get()
+                .orElseThrow(Error::new)
                 .id;
     }
 
-    String shortName(Attributes feature) { return Key.IBM_SHORTNAME.get(feature).orElseGet(() -> fullName(feature)); }
+    static String shortName(Attributes feature) { return Key.IBM_SHORTNAME.get(feature).orElseGet(() -> fullName(feature)); }
+
+    static class TreeNode<V> {
+        final V value;
+        final Map<V, TreeNode<V>> children = new LinkedHashMap<>();
+        TreeNode() { this(null); } // root node
+        TreeNode(V value) { this.value = value; }
+        private TreeNode<V> getChild(V value) { return children.computeIfAbsent(value, TreeNode::new); }
+
+        void addPath(List<V> path) {
+            TreeNode<V> n = this;
+            for (V elem: path) n = n.getChild(elem);
+        }
+
+        void combine(TreeNode<V> that) { throw new UnsupportedOperationException("Parallelism not supported here"); }
+
+        void traverseDepthFirst(String prefix, Consumer<V> rootAction, Function<String, Consumer<V>> action) {
+            final Consumer<V> fmt = action.apply(prefix);
+            children.values()
+                    .stream()
+                    .peek(n -> rootAction.accept(n.value))
+                    .peek(n -> fmt.accept(n.value))
+                    .forEach(n -> n.traverseDepthFirst(prefix, action));
+        }
+
+        void traverseDepthFirst(String prefix, Function<String, Consumer<V>> formatter) {
+            if (children.isEmpty()) return;
+            final Consumer<V> printChild = formatter.apply(prefix + "\u2560\u2550");
+            children.values()
+                    .stream()
+                    .limit(children.size() - 1L)
+                    .peek(n -> printChild.accept(n.value))
+                    .forEach(n -> n.traverseDepthFirst(prefix + "\u2551 ", formatter));
+            // now format the last child: not efficient, but accurate and terse(ish)
+            children.values()
+                    .stream()
+                    .skip(children.size() - 1L)
+                    .peek(n -> formatter.apply(prefix + "\u255A\u2550").accept(n.value))
+                    .forEach(n -> n.traverseDepthFirst(prefix + "  ", formatter));
+        }
+    }
 
     static class ValueElement {
-        static final Pattern ATOM_PATTERN = Pattern.compile("(([^\";\\\\]|\\\\.)+|\"([^\\\\\"]|\\\\.)*\")+");
+        static final Pattern ATOM_PATTERN = Pattern.compile("(([^\";\\\\]|\\\\.)+|\"([^\\\\\"]|\\\\.)*+\")+");
         final String id;
         private final Map<? extends String, String> qualifiers;
 
         ValueElement(String text) {
             Matcher m = ATOM_PATTERN.matcher(text);
-            if (!!!m.find()) throw new Error("Unable to parse manifest value into constituent parts: " + text);
+            if (!m.find()) throw new Error("Unable to parse manifest value into constituent parts: " + text);
             this.id = m.group();
             Map<String, String> map = new TreeMap<>();
             while(m.find(m.end())) {
@@ -354,8 +376,6 @@ public class lfe {
             }
             this.qualifiers = unmodifiableMap(map);
         }
-
-        boolean hasQualifier(String key) { return qualifiers.containsKey(key); }
 
         String getQualifier(String key) { return qualifiers.get(key); }
 
@@ -400,13 +420,13 @@ public class lfe {
         TOOL("Tool"),
         WLP_ACTIVATION_TYPE("WLP-Activation-Type")
         ;
-        static final Pattern ELEMENT_PATTERN = Pattern.compile("(([^\",\\\\]|\\\\.)+|\"([^\\\\\"]|\\\\.)*\")+");
+        static final Pattern ELEMENT_PATTERN = Pattern.compile("(([^\",\\\\]|\\\\.)+|\"([^\\\\\"]|\\\\.)*+\")+");
         final Attributes.Name name;
         Key(String name) { this.name = new Attributes.Name(name); }
         boolean isPresent(Attributes feature) {
             return feature.containsKey(name);
         }
-        boolean isAbsent(Attributes feature) { return !!! isPresent(feature); }
+        boolean isAbsent(Attributes feature) { return ! isPresent(feature); }
         Optional<String> get(Attributes feature) { return Optional.ofNullable(feature.getValue(name)); }
         Stream<ValueElement> parseValues(Attributes feature) {
             return get(feature)
@@ -436,13 +456,11 @@ public class lfe {
                     .map(Visibility::valueOf)
                     .orElse(Visibility.DEFAULT);
         }
-
-        String format() { return String.format("%-10s", name().toLowerCase()); }
-
+        String format(boolean tabs) { return String.format((tabs ? "%s" : "%-10s"), name().toLowerCase()); }
         public boolean test(Attributes feature) { return this == from(feature); }
     }
 
-    class WLP {
+    final class WLP {
         final Path root;
         final Path featureSubdir;
         final Map<String, Attributes> featureMap = new HashMap<>();
@@ -455,29 +473,28 @@ public class lfe {
             this.root = Paths.get(".");
             this.featureSubdir = this.root.resolve(FEATURES_SUBDIR);
             // validate directories
-            if (!!! Files.isDirectory(this.root)) throw new Error("Not a valid directory: " + this.root.toFile().getAbsolutePath());
-            if (!!! Files.isDirectory(featureSubdir)) throw new Error("No feature subdirectory found: " + featureSubdir.toFile().getAbsolutePath());
+            if (! Files.isDirectory(this.root)) throw new Error("Not a valid directory: " + this.root.toFile().getAbsolutePath());
+            if (! Files.isDirectory(featureSubdir)) throw new Error("No feature subdirectory found: " + featureSubdir.toFile().getAbsolutePath());
             // parse feature manifests
-            try {
-                Files.list(featureSubdir)
+            try (var paths = Files.list(featureSubdir)){
+                paths
                         .filter(Files::isRegularFile)
                         .filter(p -> p.toString().endsWith(".mf"))
-                        .map(lfe.this::read)
+                        .map(lfe::read)
                         .forEach(f -> {
-                            if (null != featureMap.put(fullName(f), f))
-                                if (!flags.contains(Flag.IGNORE_DUPLICATES))
-                                    System.err.println("WARNING: duplicate symbolic name found: " + Key.SUBSYSTEM_SYMBOLICNAME.get(f));
-                            Key.IBM_SHORTNAME.get(f).ifPresent(shortName -> {
-                                if (null != shortNames.put(shortName, f))
-                                    if (!flags.contains(Flag.IGNORE_DUPLICATES))
-                                        System.err.println("WARNING: duplicate short name found: " + shortName);
-                            });
+                            var oldValue = featureMap.put(fullName(f), f);
+                            if (null != oldValue && !flags.contains(Flag.IGNORE_DUPLICATES))
+                                System.err.println("WARNING: duplicate symbolic name found: " + Key.SUBSYSTEM_SYMBOLICNAME.get(f));
+                            Key.IBM_SHORTNAME.get(f)
+                                    .map(shortName -> shortNames.put(shortName, f))
+                                    .filter(whatever -> !flags.contains(Flag.IGNORE_DUPLICATES))
+                                    .ifPresent(shortName -> System.err.println("WARNING: duplicate short name found: " + shortName));
                         });
             } catch (IOException e) {
                 throw new IOError(e);
             }
             // sort the features by full name
-            this.features = allFeatures().sorted(comparing(lfe.this::fullName)).toArray(Attributes[]::new);
+            this.features = allFeatures().sorted(comparing(lfe::fullName)).toArray(Attributes[]::new);
             // create a reverse look-up table for the array
             for (int i = 0; i < features.length; i++) featureIndex.put(features[i], i);
             // create an initially empty dependency matrix
@@ -500,11 +517,11 @@ public class lfe {
         void warnMissingFeatures() {
             allFeatures()
                     .filter(Key.SUBSYSTEM_CONTENT)
-                    .sorted(comparing(lfe.this::fullName))
+                    .sorted(comparing(lfe::fullName))
                     .forEach(f -> Key.SUBSYSTEM_CONTENT.parseValues(f)
                             .filter(v -> "osgi.subsystem.feature".equals(v.getQualifier("type")))
                             .map(v -> v.id)
-                            .filter(id -> !!!featureMap.containsKey(id))
+                            .filter(id -> !featureMap.containsKey(id))
                             .forEach(id -> System.err.printf("WARNING: feature '%s' depends on absent feature '%s'. " +
                                             "This dependency will be ignored.%n", fullName(f), id)));
         }
@@ -515,7 +532,7 @@ public class lfe {
             if (queries.isEmpty()) return Stream.empty();
             List<List<Attributes>> results = new ArrayList<>();
             for (List<Pattern> patterns: queries)
-                findFeaturePaths(allFeatures(), unmodifiableList(copyOf(patterns)), new ArrayList<>(), results);
+                findFeaturePaths(allFeatures(), copyOf(patterns), new ArrayList<>(), results);
             return results.stream();
         }
 
@@ -526,15 +543,9 @@ public class lfe {
             }
             Pattern p = Lists.head(patterns);
             List<Pattern> remainingPatterns = Lists.tail(patterns);
-            //noinspection ResultOfMethodCallIgnored
             searchSpace
                     .filter(f -> featureMatchesPattern(f, p))
-                    .peek(f -> findFeaturePaths(dependencies(f), remainingPatterns, Lists.concat(path, f), results))
-                    .count();
-        }
-
-        Stream<Attributes> findFeatures(Pattern p, Comparator<Attributes> sortOrder) {
-            return allFeatures().filter(f -> featureMatchesPattern(f, p)).sorted(sortOrder);
+                    .forEach(f -> findFeaturePaths(dependencies(f), remainingPatterns, Lists.append(path, f), results));
         }
 
         Stream<Attributes> dependencies(Attributes rootFeature) {
@@ -544,16 +555,10 @@ public class lfe {
 
     enum Lists {
         ;
-
         static <T> T head(List<T> list) { return list.get(0); }
-
         static <T> List<T> tail(List<T> list) { return list.subList(1, list.size()); }
-
         @SafeVarargs
-        static <T> List<T> concat(List<T> list, T...elems) {
-            return Stream.concat(list.stream(), Stream.of(elems)).collect(toUnmodifiableList());
-        }
-
+        static <T> List<T> append(List<T> list, T...items) { return Stream.concat(list.stream(), Stream.of(items)).collect(toUnmodifiableList()); }
         static <T> T last(List<T> list) { return list.get(list.size() - 1); }
 
         static <T> Comparator<List<T>> comparingEachElement(Comparator<T> elementOrder) {
@@ -580,5 +585,3 @@ public class lfe {
                         .orElse(false));
     }
 }
-
-
