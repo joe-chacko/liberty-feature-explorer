@@ -1,5 +1,6 @@
 package io.openliberty.tools.lfe;
 
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -42,6 +43,11 @@ enum Flag implements Opt<Flag> {
 
     public Stream<Opt<Flag>> implied() {
         return stream(impliedFlags);
+    }
+
+    void addTo(Collection<? super Flag> flags) {
+        flags.add(this);
+        for (Flag implied: impliedFlags) flags.add(implied);
     }
 
     /**
