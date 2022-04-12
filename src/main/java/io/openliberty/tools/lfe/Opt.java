@@ -15,7 +15,7 @@ interface Opt<O extends Opt<O>> {
     Stream<Opt<O>> implied();
 
     default void addTo(Set<O> set) {
-        set.add((O) this);
+        set.add((O)this);
         implied().forEach(i -> i.addTo(set));
     }
 

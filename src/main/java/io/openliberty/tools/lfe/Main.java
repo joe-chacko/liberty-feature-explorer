@@ -30,7 +30,7 @@ public final class Main {
 
     static final Path FEATURES_SUBDIR = Paths.get("lib/features");
 
-    final LibertyTree libertyTree;
+    final LibertyFeatures libertyTree;
     final EnumSet<Flag> flags;
     final List<List<QueryElement>> queries;
     final Comparator<List<Attributes>> pathOrdering;
@@ -40,7 +40,7 @@ public final class Main {
         var parser = new ArgParser(args);
         this.flags = parser.flags;
         this.queries = parser.query;
-        this.libertyTree = new LibertyTree(flags);
+        this.libertyTree = new LibertyFeatures(flags.contains(Flag.IGNORE_DUPLICATES));
         this.featureOrdering = flags.contains(Flag.SIMPLE_SORT)
                 ? comparing(this::featureName)
                 : comparing(Visibility::from).thenComparing(this::featureName);
@@ -168,4 +168,3 @@ public final class Main {
     static String shortName(Attributes feature) { return Key.IBM_SHORTNAME.get(feature).orElseGet(() -> fullName(feature)); }
 
 }
-

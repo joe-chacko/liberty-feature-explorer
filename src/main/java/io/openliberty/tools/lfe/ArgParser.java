@@ -17,7 +17,7 @@ final class ArgParser {
         this.args = args;
         this.argIndex = 0;
         parseOptions();
-        this.query = parseReLFEingArguments();
+        this.query = parseRemainingArguments();
     }
 
     void parseOptions() {
@@ -38,7 +38,7 @@ final class ArgParser {
         }
     }
 
-    List<List<QueryElement>> parseReLFEingArguments() {
+    List<List<QueryElement>> parseRemainingArguments() {
         return IntStream.range(argIndex, args.length)
                 .peek(i -> argIndex = i)
                 .mapToObj(i -> args[i])

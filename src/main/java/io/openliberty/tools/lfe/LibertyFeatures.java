@@ -11,15 +11,12 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
-import java.util.Set;
 import java.util.jar.Attributes;
 import java.util.stream.Stream;
 
 import static java.util.Comparator.comparing;
 
-final class LibertyTree {
-    final Set<Flag> flags;
+final class LibertyFeatures {
     final Path root;
     final Path featureSubdir;
     final Map<String, Attributes> featureMap = new HashMap<>();
@@ -28,8 +25,7 @@ final class LibertyTree {
     final Map<Attributes, Integer> featureIndex = new HashMap<>();
     final BitSet[] dependencyMatrix;
 
-    LibertyTree(Set<Flag> flags) {
-        this.flags = flags;
+    LibertyFeatures(boolean ignoreDuplicates) {
         this.root = Paths.get(".");
         this.featureSubdir = this.root.resolve(Main.FEATURES_SUBDIR);
         // validate directories
@@ -45,11 +41,11 @@ final class LibertyTree {
                     .map(Main::read)
                     .forEach(f -> {
                         var oldValue = featureMap.put(Main.fullName(f), f);
-                        if (null != oldValue && !flags.contains(Flag.IGNORE_DUPLICATES))
+                        if (null != oldValue && !ignoreDuplicates)
                             System.err.println("WARNING: duplicate symbolic name found: " + Key.SUBSYSTEM_SYMBOLICNAME.get(f));
                         Key.IBM_SHORTNAME.get(f)
                                 .map(shortName -> shortNames.put(shortName, f))
-                                .filter(whatever -> !flags.contains(Flag.IGNORE_DUPLICATES))
+                                .filter(whatever -> !ignoreDuplicates)
                                 .ifPresent(shortName -> System.err.println("WARNING: duplicate short name found: " + shortName));
                     });
         } catch (IOException e) {
