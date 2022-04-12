@@ -51,7 +51,6 @@ import java.util.stream.Stream;
 import static java.util.Arrays.stream;
 import static java.util.Collections.unmodifiableMap;
 import static java.util.Comparator.comparing;
-import static java.util.List.copyOf;
 import static java.util.function.Predicate.not;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toUnmodifiableList;
@@ -154,13 +153,15 @@ public final class lfe {
             return IntStream.range(argIndex, args.length)
                     .peek(i -> argIndex = i)
                     .mapToObj(i -> args[i])
-                    .map(ArgParser::parseQuery).collect(toUnmodifiableList());
+                    .map(ArgParser::parseQuery)
+                    .collect(toUnmodifiableList());
         }
 
         private static List<Pattern> parseQuery(String s) {
             return Stream.of(s.split("/"))
                     .map(lfe::globToRegex)
-                    .map(Pattern::compile).collect(toUnmodifiableList());
+                    .map(Pattern::compile)
+                    .collect(toUnmodifiableList());
         }
     }
 
@@ -438,7 +439,6 @@ public final class lfe {
         }
         public String apply(Attributes feature) { return feature.getValue(name); }
         public boolean test(Attributes feature) { return isPresent(feature); }
-
     }
 
     enum Visibility implements Predicate<Attributes> {
@@ -532,20 +532,19 @@ public final class lfe {
             if (queries.isEmpty()) return Stream.empty();
             List<List<Attributes>> results = new ArrayList<>();
             for (List<Pattern> patterns: queries)
-                findFeaturePaths(allFeatures(), copyOf(patterns), new ArrayList<>(), results);
+                findFeaturePaths(allFeatures(), patterns, 0, new ArrayList<>(), results);
             return results.stream();
         }
 
-        private void findFeaturePaths(Stream<Attributes> searchSpace, List<Pattern> patterns, List<Attributes> path, List<List<Attributes>> results) {
-            if (patterns.isEmpty()) {
-                results.add(copyOf(path));
+        private void findFeaturePaths(Stream<Attributes> searchSpace, List<Pattern> patterns, int index, List<Attributes> path, List<List<Attributes>> results) {
+            if (patterns.size() == index) {
+                results.add(path);
                 return;
             }
-            Pattern p = Lists.head(patterns);
-            List<Pattern> remainingPatterns = Lists.tail(patterns);
+            Pattern p = patterns.get(index);
             searchSpace
                     .filter(f -> featureMatchesPattern(f, p))
-                    .forEach(f -> findFeaturePaths(dependencies(f), remainingPatterns, Lists.append(path, f), results));
+                    .forEach(f -> findFeaturePaths(dependencies(f), patterns, index + 1, Lists.append(path, f), results));
         }
 
         Stream<Attributes> dependencies(Attributes rootFeature) {
