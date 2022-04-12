@@ -1,0 +1,30 @@
+plugins {
+    id 'java'
+    id "application"
+}
+
+ext {
+   javaMainClass = "io.openliberty.tools.lfe.Main"
+}
+
+tasks.named('wrapper') {
+    jarFile = rootProject.file('.gradle/gradle-wrapper.jar')
+}
+
+compileJava {
+    sourceCompatibility = '11'
+    targetCompatibility = '11'
+}
+
+application {
+    mainClassName = javaMainClass
+}
+
+//jar {manifest {attributes 'Main-Class': javaMainClass}}
+
+group 'io.openliberty.tools'
+version '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
