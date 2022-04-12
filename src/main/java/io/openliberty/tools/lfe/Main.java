@@ -4,21 +4,14 @@ import java.io.FileInputStream;
 import java.io.IOError;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.ArrayList;
-import java.util.BitSet;
 import java.util.Comparator;
 import java.util.EnumSet;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.Objects;
 import java.util.function.Consumer;
 import java.util.jar.Attributes;
 import java.util.jar.Manifest;
-import java.util.stream.Stream;
 
 import static java.util.Comparator.comparing;
 import static java.util.stream.Collectors.joining;
@@ -37,8 +30,8 @@ public final class Main {
 
     static final Path FEATURES_SUBDIR = Paths.get("lib/features");
 
-    final Liberty liberty;
-    final EnumSet<Flag> flags ;
+    final LibertyTree libertyTree;
+    final EnumSet<Flag> flags;
     final List<List<QueryElement>> queries;
     final Comparator<List<Attributes>> pathOrdering;
     final Comparator<Attributes> featureOrdering;
@@ -47,7 +40,7 @@ public final class Main {
         var parser = new ArgParser(args);
         this.flags = parser.flags;
         this.queries = parser.query;
-        this.liberty = new Liberty();
+        this.libertyTree = new LibertyTree(flags);
         this.featureOrdering = flags.contains(Flag.SIMPLE_SORT)
                 ? comparing(this::featureName)
                 : comparing(Visibility::from).thenComparing(this::featureName);
@@ -57,37 +50,35 @@ public final class Main {
     void run() {
         // some flags need processing up front
         if (flags.contains(Flag.HELP)) { printUsage(); return; }
-        if (flags.contains(Flag.WARN_MISSING)) liberty.warnMissingFeatures();
+        if (flags.contains(Flag.WARN_MISSING)) libertyTree.warnMissingFeatures();
 
         printHeadersIfNeeded();
 
         final Consumer<Attributes> printVisibilityHeadings = usingHeadings() ? printVisibilityHeadings() : (f -> {});
         final String initialIndent = usingHeadings() ? "  " : "";
 
-        if (flags.contains(Flag.SHOW_PATHS)) {
-            if (flags.contains(Flag.TAB_DELIMITERS)) {
-                liberty.findFeaturePaths(queries)
-                        .sorted(pathOrdering)
-                        .distinct()
-                        .forEach(path -> {
-                            String indent = path.stream()
-                                    .map(this::featureName)
-                                    .collect(joining("/"))
-                                    .replaceFirst("[^/]*$", "");
-                            System.out.println(formatFeature(indent, path.get(path.size() - 1)));
-                        });
-            } else {
-                liberty.findFeaturePaths(queries)
-                        .sorted(pathOrdering)
-                        .distinct()
-                        // collect these into a tree structure
-                        .collect(TreeNode<Attributes>::new, TreeNode::addPath, TreeNode::combine)
-                        // print the tree in ASCII
-                        .traverseDepthFirst(initialIndent, printVisibilityHeadings,
-                                prefix -> feature -> System.out.println(formatFeature(prefix, feature)));
-            }
+        if (flags.contains(Flag.PATHS)) {
+            libertyTree.findFeaturePaths(queries)
+                    .sorted(pathOrdering)
+                    .distinct()
+                    .forEach(path -> {
+                        String indent = path.stream()
+                                .map(this::featureName)
+                                .collect(joining("/"))
+                                .replaceFirst("[^/]*$", "");
+                        System.out.println(formatFeature(indent, path.get(path.size() - 1)));
+                    });
+        } else if (flags.contains(Flag.TREE)) {
+            libertyTree.findFeaturePaths(queries)
+                    .sorted(pathOrdering)
+                    .distinct()
+                    // collect these into a tree structure
+                    .collect(TreeNode<Attributes>::new, TreeNode::addPath, TreeNode::combine)
+                    // print the tree in ASCII
+                    .traverseDepthFirst(initialIndent, printVisibilityHeadings,
+                            prefix -> feature -> System.out.println(formatFeature(prefix, feature)));
         } else {
-            liberty.findFeaturePaths(queries)
+            libertyTree.findFeaturePaths(queries)
                     .map(Lists::last)
                     .sorted(featureOrdering)
                     .distinct()
@@ -98,7 +89,7 @@ public final class Main {
     }
 
     private void printHeadersIfNeeded() {
-        if (flags.contains(Flag.DECORATE) && ! flags.contains(Flag.TAB_DELIMITERS)) {
+        if (flags.contains(Flag.DECORATE) && ! flags.contains(Flag.TABS)) {
             // print some heading columns first
             System.out.println("# VISIBILITY AUTO SUPERSEDED SINGLETON FEATURE NAME");
             System.out.println("# ========== ==== ========== ========= ============");
@@ -149,7 +140,7 @@ public final class Main {
     }
 
     String formatFeature(String prefix, Attributes feature) {
-        final boolean useTabs = flags.contains(Flag.TAB_DELIMITERS);
+        final boolean useTabs = flags.contains(Flag.TABS);
         final char DELIM = useTabs ? '\t' : ' ';
         final String visibility = Visibility.from(feature).format(useTabs);
         String indent = useTabs ? "" : "  ";
@@ -176,97 +167,5 @@ public final class Main {
 
     static String shortName(Attributes feature) { return Key.IBM_SHORTNAME.get(feature).orElseGet(() -> fullName(feature)); }
 
-    final class Liberty {
-        final Path root;
-        final Path featureSubdir;
-        final Map<String, Attributes> featureMap = new HashMap<>();
-        final Map<String, Attributes> shortNames = new HashMap<>();
-        final Attributes[] features;
-        final Map<Attributes, Integer> featureIndex = new HashMap<>();
-        final BitSet[] dependencyMatrix;
-
-        Liberty() {
-            this.root = Paths.get(".");
-            this.featureSubdir = this.root.resolve(Main.FEATURES_SUBDIR);
-            // validate directories
-            if (! Files.isDirectory(this.root)) throw new Error("Not a valid directory: " + this.root.toFile().getAbsolutePath());
-            if (! Files.isDirectory(featureSubdir)) throw new Error("No feature subdirectory found: " + featureSubdir.toFile().getAbsolutePath());
-            // parse feature manifests
-            try (var paths = Files.list(featureSubdir)){
-                paths
-                        .filter(Files::isRegularFile)
-                        .filter(p -> p.toString().endsWith(".mf"))
-                        .map(Main::read)
-                        .forEach(f -> {
-                            var oldValue = featureMap.put(Main.fullName(f), f);
-                            if (null != oldValue && !flags.contains(Flag.IGNORE_DUPLICATES))
-                                System.err.println("WARNING: duplicate symbolic name found: " + Key.SUBSYSTEM_SYMBOLICNAME.get(f));
-                            Key.IBM_SHORTNAME.get(f)
-                                    .map(shortName -> shortNames.put(shortName, f))
-                                    .filter(whatever -> !flags.contains(Flag.IGNORE_DUPLICATES))
-                                    .ifPresent(shortName -> System.err.println("WARNING: duplicate short name found: " + shortName));
-                        });
-            } catch (IOException e) {
-                throw new IOError(e);
-            }
-            // sort the features by full name
-            this.features = allFeatures().sorted(comparing(Main::fullName)).toArray(Attributes[]::new);
-            // create a reverse look-up table for the array
-            for (int i = 0; i < features.length; i++) featureIndex.put(features[i], i);
-            // create an initially empty dependency matrix
-            this.dependencyMatrix = Stream.generate(() -> new BitSet(features.length)).limit(features.length).toArray(BitSet[]::new);
-            // add the dependencies
-            allFeatures()
-                    .filter(Key.SUBSYSTEM_CONTENT)
-                    .forEach(f -> {
-                        BitSet dependencies = dependencyMatrix[featureIndex.get(f)];
-                        Key.SUBSYSTEM_CONTENT.parseValues(f)
-                                .filter(v -> "osgi.subsystem.feature".equals(v.getQualifier("type")))
-                                .map(v -> v.id)
-                                .map(featureMap::get)
-                                .map(featureIndex::get)
-                                .filter(Objects::nonNull) // ignore unknown features TODO: try tolerated versions instead
-                                .forEach(dependencies::set);
-                    });
-        }
-
-        void warnMissingFeatures() {
-            allFeatures()
-                    .filter(Key.SUBSYSTEM_CONTENT)
-                    .sorted(comparing(Main::fullName))
-                    .forEach(f -> Key.SUBSYSTEM_CONTENT.parseValues(f)
-                            .filter(v -> "osgi.subsystem.feature".equals(v.getQualifier("type")))
-                            .map(v -> v.id)
-                            .filter(id -> !featureMap.containsKey(id))
-                            .forEach(id -> System.err.printf("WARNING: feature '%s' depends on absent feature '%s'. " +
-                                    "This dependency will be ignored.%n", fullName(f), id)));
-        }
-
-        Stream<Attributes> allFeatures() { return featureMap.values().stream(); }
-
-        Stream<List<Attributes>> findFeaturePaths(List<List<QueryElement>> queries) {
-            if (queries.isEmpty()) return Stream.empty();
-            List<List<Attributes>> results = new ArrayList<>();
-            for (List<QueryElement> query: queries)
-                findFeaturePaths(allFeatures(), query, 0, new ArrayList<>(), results);
-            return results.stream();
-        }
-
-        private void findFeaturePaths(Stream<Attributes> searchSpace, List<QueryElement> query, int index, List<Attributes> path, List<List<Attributes>> results) {
-            if (query.size() == index) {
-                results.add(path);
-                    return;
-            }
-            QueryElement qe = query.get(index);
-            int newIndex = index + 1;
-            searchSpace
-                    .filter(qe::matches)
-                    .forEach(f -> findFeaturePaths(dependencies(f), query, newIndex, Lists.append(path, f), results));
-        }
-
-        Stream<Attributes> dependencies(Attributes rootFeature) {
-            return dependencyMatrix[featureIndex.get(rootFeature)].stream().mapToObj(i -> features[i]);
-        }
-    }
 }
 

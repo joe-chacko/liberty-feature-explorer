@@ -17,15 +17,14 @@ enum Flag implements Opt<Flag> {
             + "%n\t\t\tsuperseded - has been superseded by another feature"
             + "%n\t\t\tsingleton - only one version of this feature can be installed per server"),
     FULL_NAMES("Always use the symbolic name of the feature, even if it has a short name."),
-    TAB_DELIMITERS("Suppress headers and use tabs to delimit fields to aid scripting.", DECORATE),
-    SHOW_PATHS("Display all matching dependency trees (paths if --tab-delimiters is specified)"),
+    TREE("Display all matching dependency trees"),
+    PATHS("Display all matching paths (supersedes " + TREE.toArg() + ")"),
+    TABS("Suppress headers and use tabs to delimit fields to aid scripting.", DECORATE),
     SIMPLE_SORT("Sort by full name. Do not categorise by visibility.", FULL_NAMES),
     WARN_MISSING("Warn if any features are referenced but not present."),
     IGNORE_DUPLICATES("Do NOT report duplicate feature attributes (e..g short names)."),
     TERMINATOR("Explicitly terminate the flags so that the following argument is interpreted as a query.") {
-        public String toArg() {
-            return "--";
-        }
+        public String toArg() {return "--";}
     },
     NOT_A_FLAG(null),
     UNKNOWN(null);
