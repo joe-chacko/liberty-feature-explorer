@@ -350,27 +350,36 @@ enum Flag implements Opt<Flag> {
     static Flag fromArg(String arg) { return arg.startsWith("--") ? argMap.getOrDefault(arg, UNKNOWN) : NOT_A_FLAG; }
 }
 
-class QueryElement {
-    private final Pattern pattern;
+interface QueryElement {
+    default boolean matches(Attributes feature) { return true; }
 
-    QueryElement(String glob) {
-        this.pattern = Pattern.compile(globToRegex(glob));
+    boolean isStretchy();
+
+    static QueryElement of(String glob) {
+        switch (glob) {
+            case "*": return () -> false;
+            case "**": return () -> true;
+            default: return new QueryElement() {
+                final Pattern pattern = Pattern.compile(globToRegex(glob));
+                public boolean matches(Attributes feature) {
+                    return Key.IBM_SHORTNAME.get(feature)
+                            .map(pattern::matcher)
+                            .map(Matcher::matches)
+                            .filter(Boolean::booleanValue) // discard non-matches
+                            .orElse(Key.SUBSYSTEM_SYMBOLICNAME.parseValues(feature)
+                                    .findFirst()
+                                    .map(v -> v.id)
+                                    .map(pattern::matcher)
+                                    .map(Matcher::matches)
+                                    .orElse(false));
+                }
+
+                public boolean isStretchy() { return false; }
+            };
+        }
     }
 
-    boolean matches(Attributes f) {
-        return Key.IBM_SHORTNAME.get(f)
-                .map(pattern::matcher)
-                .map(Matcher::matches)
-                .filter(Boolean::booleanValue) // discard non-matches
-                .orElse(Key.SUBSYSTEM_SYMBOLICNAME.parseValues(f)
-                        .findFirst()
-                        .map(v -> v.id)
-                        .map(pattern::matcher)
-                        .map(Matcher::matches)
-                        .orElse(false));
-    }
-
-    private static String globToRegex(String glob) {
+    static String globToRegex(String glob) {
         try (var scanner = new Scanner(glob)) {
             var sb = new StringBuilder();
             scanner.useDelimiter("((?<=[?*])|(?=[?*]))"); // delimit immediately before and/or after a * or ?
@@ -427,7 +436,7 @@ final class ArgParser {
 
     private static List<QueryElement> parseQuery(String s) {
         return Stream.of(s.split("/"))
-                .map(QueryElement::new)
+                .map(QueryElement::of)
                 .collect(toUnmodifiableList());
     }
 }
