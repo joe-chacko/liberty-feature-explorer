@@ -109,7 +109,7 @@ public final class lfe {
 
     final Liberty liberty;
     final EnumSet<Flag> flags ;
-    final List<List<Pattern>> queries;
+    final List<List<QueryElement>> queries;
     final Comparator<List<Attributes>> pathOrdering;
     final Comparator<Attributes> featureOrdering;
 
@@ -124,9 +124,51 @@ public final class lfe {
         }
     }
 
+    static class QueryElement {
+        private final Pattern pattern;
+
+        QueryElement(String glob) {
+            this.pattern = Pattern.compile(globToRegex(glob));
+        }
+
+        boolean matches(Attributes f) {
+            return Key.IBM_SHORTNAME.get(f)
+                    .map(pattern::matcher)
+                    .map(Matcher::matches)
+                    .filter(Boolean::booleanValue) // discard non-matches
+                    .orElse(Key.SUBSYSTEM_SYMBOLICNAME.parseValues(f)
+                            .findFirst()
+                            .map(v -> v.id)
+                            .map(pattern::matcher)
+                            .map(Matcher::matches)
+                            .orElse(false));
+        }
+
+        private static String globToRegex(String glob) {
+            try (var scanner = new Scanner(glob)) {
+                var sb = new StringBuilder();
+                scanner.useDelimiter("((?<=[?*])|(?=[?*]))"); // delimit immediately before and/or after a * or ?
+                while (scanner.hasNext()) {
+                    String token = scanner.next();
+                    switch (token) {
+                        case "?":
+                            sb.append(".");
+                            break;
+                        case "*":
+                            sb.append(".*");
+                            break;
+                        default:
+                            sb.append(Pattern.quote(token));
+                    }
+                }
+                return sb.toString();
+            }
+        }
+    }
+
     static final class ArgParser {
         final EnumSet<Flag> flags = EnumSet.noneOf(Flag.class);
-        final List<List<Pattern>> query;
+        final List<List<QueryElement>> query;
         final String[] args;
         int argIndex;
 
@@ -149,7 +191,7 @@ public final class lfe {
             }
         }
 
-        List<List<Pattern>> parseRemainingArguments() {
+        List<List<QueryElement>> parseRemainingArguments() {
             return IntStream.range(argIndex, args.length)
                     .peek(i -> argIndex = i)
                     .mapToObj(i -> args[i])
@@ -157,10 +199,9 @@ public final class lfe {
                     .collect(toUnmodifiableList());
         }
 
-        private static List<Pattern> parseQuery(String s) {
+        private static List<QueryElement> parseQuery(String s) {
             return Stream.of(s.split("/"))
-                    .map(lfe::globToRegex)
-                    .map(Pattern::compile)
+                    .map(QueryElement::new)
                     .collect(toUnmodifiableList());
         }
     }
@@ -174,27 +215,6 @@ public final class lfe {
                 ? comparing(this::featureName)
                 : comparing(Visibility::from).thenComparing(this::featureName);
         this.pathOrdering = Lists.comparingEachElement(featureOrdering);
-    }
-
-    static String globToRegex(String glob) {
-        try (var scanner = new Scanner(glob)) {
-            var sb = new StringBuilder();
-            scanner.useDelimiter("((?<=[?*])|(?=[?*]))"); // delimit immediately before and/or after a * or ?
-            while (scanner.hasNext()) {
-                String token = scanner.next();
-                switch (token) {
-                    case "?":
-                        sb.append(".");
-                        break;
-                    case "*":
-                        sb.append(".*");
-                        break;
-                    default:
-                        sb.append(Pattern.quote(token));
-                }
-            }
-            return sb.toString();
-        }
     }
 
     void run() {
@@ -528,23 +548,23 @@ public final class lfe {
 
         Stream<Attributes> allFeatures() { return featureMap.values().stream(); }
 
-        Stream<List<Attributes>> findFeaturePaths(List<List<Pattern>> queries) {
+        Stream<List<Attributes>> findFeaturePaths(List<List<QueryElement>> queries) {
             if (queries.isEmpty()) return Stream.empty();
             List<List<Attributes>> results = new ArrayList<>();
-            for (List<Pattern> patterns: queries)
-                findFeaturePaths(allFeatures(), patterns, 0, new ArrayList<>(), results);
+            for (List<QueryElement> query: queries)
+                findFeaturePaths(allFeatures(), query, 0, new ArrayList<>(), results);
             return results.stream();
         }
 
-        private void findFeaturePaths(Stream<Attributes> searchSpace, List<Pattern> patterns, int index, List<Attributes> path, List<List<Attributes>> results) {
-            if (patterns.size() == index) {
+        private void findFeaturePaths(Stream<Attributes> searchSpace, List<QueryElement> query, int index, List<Attributes> path, List<List<Attributes>> results) {
+            if (query.size() == index) {
                 results.add(path);
                 return;
             }
-            Pattern p = patterns.get(index);
+            QueryElement qe = query.get(index);
             searchSpace
-                    .filter(f -> featureMatchesPattern(f, p))
-                    .forEach(f -> findFeaturePaths(dependencies(f), patterns, index + 1, Lists.append(path, f), results));
+                    .filter(qe::matches)
+                    .forEach(f -> findFeaturePaths(dependencies(f), query, index + 1, Lists.append(path, f), results));
         }
 
         Stream<Attributes> dependencies(Attributes rootFeature) {
