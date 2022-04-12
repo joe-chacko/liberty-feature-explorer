@@ -107,7 +107,7 @@ public final class lfe {
         static Flag fromArg(String arg) { return arg.startsWith("--") ? argMap.getOrDefault(arg, UNKNOWN) : NOT_A_FLAG; }
     }
 
-    final WLP wlp;
+    final Liberty liberty;
     final EnumSet<Flag> flags ;
     final List<List<Pattern>> queries;
     final Comparator<List<Attributes>> pathOrdering;
@@ -169,7 +169,7 @@ public final class lfe {
         var parser = new ArgParser(args);
         this.flags = parser.flags;
         this.queries = parser.query;
-        this.wlp = new WLP();
+        this.liberty = new Liberty();
         this.featureOrdering = flags.contains(Flag.SIMPLE_SORT)
                 ? comparing(this::featureName)
                 : comparing(Visibility::from).thenComparing(this::featureName);
@@ -200,7 +200,7 @@ public final class lfe {
     void run() {
         // some flags need processing up front
         if (flags.contains(Flag.HELP)) { printUsage(); return; }
-        if (flags.contains(Flag.WARN_MISSING)) wlp.warnMissingFeatures();
+        if (flags.contains(Flag.WARN_MISSING)) liberty.warnMissingFeatures();
 
         printHeadersIfNeeded();
 
@@ -209,7 +209,7 @@ public final class lfe {
 
         if (flags.contains(Flag.SHOW_PATHS)) {
             if (flags.contains(Flag.TAB_DELIMITERS)) {
-                wlp.findFeaturePaths(queries)
+                liberty.findFeaturePaths(queries)
                         .sorted(pathOrdering)
                         .distinct()
                         .forEach(path -> {
@@ -220,7 +220,7 @@ public final class lfe {
                             System.out.println(formatFeature(indent, path.get(path.size() - 1)));
                         });
             } else {
-                wlp.findFeaturePaths(queries)
+                liberty.findFeaturePaths(queries)
                         .sorted(pathOrdering)
                         .distinct()
                         // collect these into a tree structure
@@ -230,7 +230,7 @@ public final class lfe {
                                 prefix -> feature -> System.out.println(formatFeature(prefix, feature)));
             }
         } else {
-            wlp.findFeaturePaths(queries)
+            liberty.findFeaturePaths(queries)
                     .map(Lists::last)
                     .sorted(featureOrdering)
                     .distinct()
@@ -460,7 +460,7 @@ public final class lfe {
         public boolean test(Attributes feature) { return this == from(feature); }
     }
 
-    final class WLP {
+    final class Liberty {
         final Path root;
         final Path featureSubdir;
         final Map<String, Attributes> featureMap = new HashMap<>();
@@ -469,7 +469,7 @@ public final class lfe {
         final Map<Attributes, Integer> featureIndex = new HashMap<>();
         final BitSet[] dependencyMatrix;
 
-        WLP() {
+        Liberty() {
             this.root = Paths.get(".");
             this.featureSubdir = this.root.resolve(FEATURES_SUBDIR);
             // validate directories
